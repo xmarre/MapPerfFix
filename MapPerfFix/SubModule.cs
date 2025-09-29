@@ -25,6 +25,9 @@ namespace MapPerfProbe
         [ThreadStatic] private static MethodBase _rootPeriodic;
         [ThreadStatic] private static bool _traceMem;
         [ThreadStatic] private static Dictionary<MethodBase, (double sum, int n)> _rootBucket;
+        [ThreadStatic] private static double _rootBurstTotal;
+        [ThreadStatic] private static int _rootDepth;
+        private const double RootChildPrintCutoffMs = 0.2;
         private static readonly ConcurrentDictionary<MethodBase, double> RootAgg =
             new ConcurrentDictionary<MethodBase, double>();
 
@@ -32,10 +35,15 @@ namespace MapPerfProbe
         {
             var n = m.Name;
             if (n == null) return false;
-            return n.Contains("DailyTick") || n.Contains("HourlyTick") || n.Contains("WeeklyTick")
-                   || n == "TickPeriodicEvents" || n == "PeriodicDailyTick"
-                   || n == "PeriodicHourlyTick" || n == "QuarterDailyPartyTick"
-                   || n == "TickPartialHourlyAi" || n == "AiHourlyTick";
+            return n.IndexOf("DailyTick", StringComparison.Ordinal) >= 0
+                   || n.IndexOf("HourlyTick", StringComparison.Ordinal) >= 0
+                   || n.IndexOf("WeeklyTick", StringComparison.Ordinal) >= 0
+                   || string.Equals(n, "TickPeriodicEvents", StringComparison.Ordinal)
+                   || string.Equals(n, "PeriodicDailyTick", StringComparison.Ordinal)
+                   || string.Equals(n, "PeriodicHourlyTick", StringComparison.Ordinal)
+                   || string.Equals(n, "QuarterDailyPartyTick", StringComparison.Ordinal)
+                   || string.Equals(n, "TickPartialHourlyAi", StringComparison.Ordinal)
+                   || string.Equals(n, "AiHourlyTick", StringComparison.Ordinal);
         }
 
         private static long _lastFrameTS = Stopwatch.GetTimestamp();
@@ -497,12 +505,15 @@ namespace MapPerfProbe
         public static void PerfPrefix(MethodBase __originalMethod, out State __state)
         {
             __state = default;
-            // Root attribution (set flags before sampling so root gets sampled too)
-            if (++_callDepth == 1 && IsPeriodic(__originalMethod))
+            _callDepth++;
+            // Choose the first periodic seen as the root this burst
+            if (_rootPeriodic == null && IsPeriodic(__originalMethod))
             {
                 _rootPeriodic = __originalMethod;
+                _rootDepth = _callDepth;
                 _traceMem = true; // turn on per-call alloc sampling for this burst
                 _rootBucket = new Dictionary<MethodBase, (double, int)>(64);
+                _rootBurstTotal = 0.0;
             }
 
             // Burst sample memory inside periodic roots; otherwise 1/16 sampling
@@ -517,16 +528,19 @@ namespace MapPerfProbe
             var stat = Stats.GetOrAdd(__originalMethod, _ => new PerfStat(__originalMethod));
             stat.Add(dt);
 
-            // Attribute inclusive time to current periodic root (if any)
+            // Attribute to current periodic root
             var root = _rootPeriodic;
             if (root != null)
             {
                 if (ReferenceEquals(__originalMethod, root))
                 {
+                    // window total (inclusive) + burst self
                     RootAgg.AddOrUpdate(root, dt, (_, v) => v + dt);
+                    _rootBurstTotal += dt;
                 }
-                else if (_rootBucket != null)
+                else if (_rootBucket != null && _callDepth == _rootDepth + 1)
                 {
+                    // direct children only (no double count)
                     if (!_rootBucket.TryGetValue(__originalMethod, out var ag)) ag = default;
                     ag.sum += dt; ag.n++;
                     _rootBucket[__originalMethod] = ag;
@@ -550,61 +564,103 @@ namespace MapPerfProbe
                 PruneAllocCooldowns(tNow);
             }
 
-            if (_callDepth == 1)
+            if (_rootPeriodic != null && _callDepth == _rootDepth)
             {
                 // Dump top children once per burst (limit spam)
                 if (_rootBucket != null)
                 {
                     var list = new List<KeyValuePair<MethodBase, (double sum, int n)>>(_rootBucket);
                     list.Sort((a, b) => b.Value.sum.CompareTo(a.Value.sum));
-                    int take = Math.Min(8, list.Count);
                     var rOwner = root?.DeclaringType?.FullName ?? "<global>";
                     var rName = root?.Name ?? "<none>";
-                    int printed = 0;
+                    int take = Math.Min(8, list.Count);
+                    MapPerfLog.Info($"[root-burst] {rOwner}.{rName} — top children:");
+                    bool anyAboveCutoff = false;
                     for (int i = 0; i < take; i++)
                     {
                         var kv = list[i];
-                        if (kv.Value.sum < 1.0) break; // hide tiny entries
-                        if (printed++ == 0)
-                            MapPerfLog.Info($"[root-burst] {rOwner}.{rName} — top children:");
-                        var o = kv.Key.DeclaringType?.FullName ?? "<global>";
-                        MapPerfLog.Info($"  ↳ {o}.{kv.Key.Name}  total {kv.Value.sum:F1} ms (n {kv.Value.n})");
+                        if (kv.Value.sum >= RootChildPrintCutoffMs)
+                        {
+                            var o = kv.Key.DeclaringType?.FullName ?? "<global>";
+                            var pct = _rootBurstTotal > 0 ? (100.0 * kv.Value.sum / _rootBurstTotal) : 0;
+                            MapPerfLog.Info($"  ↳ {o}.{kv.Key.Name}  total {kv.Value.sum:F1} ms ({pct:F0}%) (n {kv.Value.n})");
+                            anyAboveCutoff = true;
+                        }
                     }
+                    if (!anyAboveCutoff)
+                    {
+                        for (int i = 0; i < take; i++)
+                        {
+                            var kv = list[i];
+                            var o = kv.Key.DeclaringType?.FullName ?? "<global>";
+                            var pct = _rootBurstTotal > 0 ? (100.0 * kv.Value.sum / _rootBurstTotal) : 0;
+                            MapPerfLog.Info($"  ↳ {o}.{kv.Key.Name}  total {kv.Value.sum:F1} ms ({pct:F0}%) (n {kv.Value.n})");
+                        }
+                    }
+                    double childSum = 0;
+                    for (int i = 0; i < list.Count; i++) childSum += list[i].Value.sum;
+                    var selfMs = _rootBurstTotal - childSum;
+                    if (selfMs < 0) selfMs = 0;
+                    if (take > 0 || selfMs >= RootChildPrintCutoffMs)
+                        MapPerfLog.Info($"  ↳ self total {selfMs:F1} ms");
                 }
                 _rootBucket = null;
                 _rootPeriodic = null;
                 _traceMem = false;
+                _rootDepth = 0;
+                _rootBurstTotal = 0.0;
             }
         }
 
         public static Exception PerfFinalizer(MethodBase __originalMethod, State __state, Exception __exception)
         {
-            if (__exception != null && _rootBucket != null)
+            if (__exception != null && _rootBucket != null && _rootPeriodic != null && _callDepth == _rootDepth)
             {
                 var list = new List<KeyValuePair<MethodBase, (double sum, int n)>>(_rootBucket);
                 list.Sort((a, b) => b.Value.sum.CompareTo(a.Value.sum));
-                int take = Math.Min(8, list.Count);
                 var rOwner = _rootPeriodic?.DeclaringType?.FullName ?? "<global>";
                 var rName = _rootPeriodic?.Name ?? "<none>";
-                int printed = 0;
+                int take = Math.Min(8, list.Count);
+                MapPerfLog.Info($"[root-burst:EX] {rOwner}.{rName} — top children:");
+                bool anyAboveCutoff = false;
                 for (int i = 0; i < take; i++)
                 {
                     var kv = list[i];
-                    if (kv.Value.sum < 1.0) break;
-                    if (printed++ == 0)
-                        MapPerfLog.Info($"[root-burst:EX] {rOwner}.{rName} — top children:");
-                    var o = kv.Key.DeclaringType?.FullName ?? "<global>";
-                    MapPerfLog.Info($"  ↳ {o}.{kv.Key.Name}  total {kv.Value.sum:F1} ms (n {kv.Value.n})");
+                    if (kv.Value.sum >= RootChildPrintCutoffMs)
+                    {
+                        var o = kv.Key.DeclaringType?.FullName ?? "<global>";
+                        var pct = _rootBurstTotal > 0 ? (100.0 * kv.Value.sum / _rootBurstTotal) : 0;
+                        MapPerfLog.Info($"  ↳ {o}.{kv.Key.Name}  total {kv.Value.sum:F1} ms ({pct:F0}%) (n {kv.Value.n})");
+                        anyAboveCutoff = true;
+                    }
                 }
+                if (!anyAboveCutoff)
+                {
+                    for (int i = 0; i < take; i++)
+                    {
+                        var kv = list[i];
+                        var o = kv.Key.DeclaringType?.FullName ?? "<global>";
+                        var pct = _rootBurstTotal > 0 ? (100.0 * kv.Value.sum / _rootBurstTotal) : 0;
+                        MapPerfLog.Info($"  ↳ {o}.{kv.Key.Name}  total {kv.Value.sum:F1} ms ({pct:F0}%) (n {kv.Value.n})");
+                    }
+                }
+                double childSum = 0;
+                for (int i = 0; i < list.Count; i++) childSum += list[i].Value.sum;
+                var selfMs = _rootBurstTotal - childSum;
+                if (selfMs < 0) selfMs = 0;
+                if (take > 0 || selfMs >= RootChildPrintCutoffMs)
+                    MapPerfLog.Info($"  ↳ self total {selfMs:F1} ms");
             }
 
             // ensure depth + burst cleanup even if the original threw
-            if (--_callDepth <= 0)
+            if (--_callDepth <= 0 || (_rootPeriodic != null && _callDepth < _rootDepth))
             {
                 _callDepth = 0;
                 _rootBucket = null;
                 _rootPeriodic = null;
                 _traceMem = false;
+                _rootDepth = 0;
+                _rootBurstTotal = 0.0;
             }
             return __exception; // don't swallow
         }
