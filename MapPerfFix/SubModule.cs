@@ -6,7 +6,6 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using TaleWorlds.CampaignSystem;
-using TaleWorlds.CampaignSystem.GameStates;
 using TaleWorlds.Core;
 using TaleWorlds.Library;
 using TaleWorlds.MountAndBlade;
@@ -31,7 +30,7 @@ namespace MapPerfProbe
             Log("=== MapPerfProbe start ===");
 
             // Patch buckets: MapState ticks, CampaignEventDispatcher ticks, Gauntlet MapScreen ticks.
-            TryPatchType("TaleWorlds.CampaignSystem.GameStates.MapState",
+            TryPatchType("TaleWorlds.CampaignSystem.GameState.MapState",
                 new[] { "OnTick", "OnMapModeTick", "OnFrameTick" });
 
             TryPatchType("TaleWorlds.CampaignSystem.MapState",
@@ -82,10 +81,14 @@ namespace MapPerfProbe
                 _nextFlush = 2.0; // every ~2 real seconds
                 if (IsOnMap()) FlushSummary(force: false);
             }
-        }
 
         private static bool IsOnMap()
-            => GameStateManager.Current?.ActiveState is MapState;
+        {
+            var state = GameStateManager.Current?.ActiveState;
+            if (state == null) return false;
+            var name = state.GetType().FullName ?? state.GetType().Name;
+            return name.EndsWith(".MapState", StringComparison.Ordinal) || name == "MapState";
+        }
 
         private static void TryPatchType(string typeName, string[] methodNames)
         {
