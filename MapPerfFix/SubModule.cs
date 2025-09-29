@@ -21,6 +21,23 @@ namespace MapPerfProbe
         private static double _nextAllocPrune;
         private static int _sample;
 
+        [ThreadStatic] private static int _callDepth;
+        [ThreadStatic] private static MethodBase _rootPeriodic;
+        [ThreadStatic] private static bool _traceMem;
+        [ThreadStatic] private static Dictionary<MethodBase, (double sum, int n)> _rootBucket;
+        private static readonly ConcurrentDictionary<MethodBase, double> RootAgg =
+            new ConcurrentDictionary<MethodBase, double>();
+
+        private static bool IsPeriodic(MethodBase m)
+        {
+            var n = m.Name;
+            if (n == null) return false;
+            return n.Contains("DailyTick") || n.Contains("HourlyTick") || n.Contains("WeeklyTick")
+                   || n == "TickPeriodicEvents" || n == "PeriodicDailyTick"
+                   || n == "PeriodicHourlyTick" || n == "QuarterDailyPartyTick"
+                   || n == "TickPartialHourlyAi" || n == "AiHourlyTick";
+        }
+
         private static long _lastFrameTS = Stopwatch.GetTimestamp();
         private static readonly int[] _gcLast = new int[3];
         private static readonly int[] _gcAgg = new int[3];
@@ -206,13 +223,15 @@ namespace MapPerfProbe
 
             var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), HookBindingFlags);
             var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), HookBindingFlags);
-            if (hmType == null || hmCtor == null || pre == null || post == null)
+            var fin = typeof(SubModule).GetMethod(nameof(PerfFinalizer), HookBindingFlags);
+            if (hmType == null || hmCtor == null || pre == null || post == null || fin == null)
             {
-                MapPerfLog.Error($"HarmonyMethod ctor or prefix/postfix not found (type={hmType != null}, ctor={hmCtor != null}, pre={pre != null}, post={post != null}).");
+                MapPerfLog.Error($"HarmonyMethod ctor or prefix/postfix/finalizer not found (type={hmType != null}, ctor={hmCtor != null}, pre={pre != null}, post={post != null}, fin={fin != null}).");
                 return;
             }
             var preHM = hmCtor.Invoke(new object[] { pre });
             var postHM = hmCtor.Invoke(new object[] { post });
+            var finHM = hmCtor.Invoke(new object[] { fin });
 
             foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
             {
@@ -227,7 +246,7 @@ namespace MapPerfProbe
 
                 try
                 {
-                    patchMi.Invoke(harmony, new object[] { m, preHM, postHM, null, null });
+                    patchMi.Invoke(harmony, new object[] { m, preHM, postHM, null, finHM });
                     MapPerfLog.Info($"Patched {t.FullName}.{m.Name}");
                 }
                 catch (Exception ex)
@@ -270,13 +289,15 @@ namespace MapPerfProbe
 
             var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), HookBindingFlags);
             var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), HookBindingFlags);
-            if (hmType == null || hmCtor == null || pre == null || post == null)
+            var fin = typeof(SubModule).GetMethod(nameof(PerfFinalizer), HookBindingFlags);
+            if (hmType == null || hmCtor == null || pre == null || post == null || fin == null)
             {
-                MapPerfLog.Error($"HarmonyMethod ctor or prefix/postfix not found (type={hmType != null}, ctor={hmCtor != null}, pre={pre != null}, post={post != null}).");
+                MapPerfLog.Error($"HarmonyMethod ctor or prefix/postfix/finalizer not found (type={hmType != null}, ctor={hmCtor != null}, pre={pre != null}, post={post != null}, fin={fin != null}).");
                 return;
             }
             var preHM = hmCtor.Invoke(new object[] { pre });
             var postHM = hmCtor.Invoke(new object[] { post });
+            var finHM = hmCtor.Invoke(new object[] { fin });
 
             string[] nameHits = { "DailyTick", "HourlyTick", "WeeklyTick", "OnDailyTick", "OnHourlyTick" };
 
@@ -308,7 +329,7 @@ namespace MapPerfProbe
                         if (byref) continue;
                         try
                         {
-                            patchMi.Invoke(harmony, new object[] { m, preHM, postHM, null, null });
+                            patchMi.Invoke(harmony, new object[] { m, preHM, postHM, null, finHM });
                             MapPerfLog.Info($"Patched {t.FullName}.{m.Name}");
                         }
                         catch (Exception ex)
@@ -336,13 +357,15 @@ namespace MapPerfProbe
 
             var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), HookBindingFlags);
             var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), HookBindingFlags);
-            if (hmType == null || hmCtor == null || pre == null || post == null)
+            var fin = typeof(SubModule).GetMethod(nameof(PerfFinalizer), HookBindingFlags);
+            if (hmType == null || hmCtor == null || pre == null || post == null || fin == null)
             {
-                MapPerfLog.Error($"HarmonyMethod ctor or prefix/postfix not found (type={hmType != null}, ctor={hmCtor != null}, pre={pre != null}, post={post != null}).");
+                MapPerfLog.Error($"HarmonyMethod ctor or prefix/postfix/finalizer not found (type={hmType != null}, ctor={hmCtor != null}, pre={pre != null}, post={post != null}, fin={fin != null}).");
                 return;
             }
             var preHM = hmCtor.Invoke(new object[] { pre });
             var postHM = hmCtor.Invoke(new object[] { post });
+            var finHM = hmCtor.Invoke(new object[] { fin });
 
             // Focused set: core campaign + party/settlement/AI/economy
             string[] typeHits =
@@ -397,7 +420,7 @@ namespace MapPerfProbe
                         for (int i = 0; i < ps.Length; i++) if (ps[i].ParameterType.IsByRef) { byref = true; break; }
                         if (byref) continue;
 
-                        try { patchMi.Invoke(harmony, new object[] { m, preHM, postHM, null, null }); MapPerfLog.Info($"Patched {t.FullName}.{name}"); }
+                        try { patchMi.Invoke(harmony, new object[] { m, preHM, postHM, null, finHM }); MapPerfLog.Info($"Patched {t.FullName}.{name}"); }
                         catch (Exception ex) { MapPerfLog.Error($"Patch fail {t.FullName}.{name}", ex); }
                     }
                 }
@@ -421,13 +444,15 @@ namespace MapPerfProbe
 
             var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), HookBindingFlags);
             var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), HookBindingFlags);
-            if (hmType == null || hmCtor == null || pre == null || post == null)
+            var fin = typeof(SubModule).GetMethod(nameof(PerfFinalizer), HookBindingFlags);
+            if (hmType == null || hmCtor == null || pre == null || post == null || fin == null)
             {
-                MapPerfLog.Error($"HarmonyMethod ctor or prefix/postfix not found (type={hmType != null}, ctor={hmCtor != null}, pre={pre != null}, post={post != null}).");
+                MapPerfLog.Error($"HarmonyMethod ctor or prefix/postfix/finalizer not found (type={hmType != null}, ctor={hmCtor != null}, pre={pre != null}, post={post != null}, fin={fin != null}).");
                 return;
             }
             var preHM = hmCtor.Invoke(new object[] { pre });
             var postHM = hmCtor.Invoke(new object[] { post });
+            var finHM = hmCtor.Invoke(new object[] { fin });
 
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
             {
@@ -447,7 +472,7 @@ namespace MapPerfProbe
                         bool byref = false;
                         for (int i = 0; i < ps.Length; i++) if (ps[i].ParameterType.IsByRef) { byref = true; break; }
                         if (byref) continue;
-                        try { patchMi.Invoke(harmony, new object[] { m, preHM, postHM, null, null }); MapPerfLog.Info($"Patched {t.FullName}.{m.Name}"); }
+                        try { patchMi.Invoke(harmony, new object[] { m, preHM, postHM, null, finHM }); MapPerfLog.Info($"Patched {t.FullName}.{m.Name}"); }
                         catch (Exception ex) { MapPerfLog.Error($"Patch fail {t.FullName}.{m.Name}", ex); }
                     }
                 }
@@ -472,8 +497,17 @@ namespace MapPerfProbe
         public static void PerfPrefix(MethodBase __originalMethod, out State __state)
         {
             __state = default;
-            if ((Interlocked.Increment(ref _sample) & 0xF) == 0)
-                __state.mem = GC.GetTotalMemory(false);
+            // Root attribution (set flags before sampling so root gets sampled too)
+            if (++_callDepth == 1 && IsPeriodic(__originalMethod))
+            {
+                _rootPeriodic = __originalMethod;
+                _traceMem = true; // turn on per-call alloc sampling for this burst
+                _rootBucket = new Dictionary<MethodBase, (double, int)>(64);
+            }
+
+            // Burst sample memory inside periodic roots; otherwise 1/16 sampling
+            bool sample = _traceMem || ((Interlocked.Increment(ref _sample) & 0xF) == 0);
+            if (sample) __state.mem = GC.GetTotalMemory(false);
             __state.ts = Stopwatch.GetTimestamp();
         }
 
@@ -482,6 +516,22 @@ namespace MapPerfProbe
             var dt = (Stopwatch.GetTimestamp() - __state.ts) * 1000.0 / Stopwatch.Frequency;
             var stat = Stats.GetOrAdd(__originalMethod, _ => new PerfStat(__originalMethod));
             stat.Add(dt);
+
+            // Attribute inclusive time to current periodic root (if any)
+            var root = _rootPeriodic;
+            if (root != null)
+            {
+                if (ReferenceEquals(__originalMethod, root))
+                {
+                    RootAgg.AddOrUpdate(root, dt, (_, v) => v + dt);
+                }
+                else if (_rootBucket != null)
+                {
+                    if (!_rootBucket.TryGetValue(__originalMethod, out var ag)) ag = default;
+                    ag.sum += dt; ag.n++;
+                    _rootBucket[__originalMethod] = ag;
+                }
+            }
 
             if (__state.mem != 0)
             {
@@ -499,6 +549,64 @@ namespace MapPerfProbe
 
                 PruneAllocCooldowns(tNow);
             }
+
+            if (_callDepth == 1)
+            {
+                // Dump top children once per burst (limit spam)
+                if (_rootBucket != null)
+                {
+                    var list = new List<KeyValuePair<MethodBase, (double sum, int n)>>(_rootBucket);
+                    list.Sort((a, b) => b.Value.sum.CompareTo(a.Value.sum));
+                    int take = Math.Min(8, list.Count);
+                    var rOwner = root?.DeclaringType?.FullName ?? "<global>";
+                    var rName = root?.Name ?? "<none>";
+                    int printed = 0;
+                    for (int i = 0; i < take; i++)
+                    {
+                        var kv = list[i];
+                        if (kv.Value.sum < 1.0) break; // hide tiny entries
+                        if (printed++ == 0)
+                            MapPerfLog.Info($"[root-burst] {rOwner}.{rName} — top children:");
+                        var o = kv.Key.DeclaringType?.FullName ?? "<global>";
+                        MapPerfLog.Info($"  ↳ {o}.{kv.Key.Name}  total {kv.Value.sum:F1} ms (n {kv.Value.n})");
+                    }
+                }
+                _rootBucket = null;
+                _rootPeriodic = null;
+                _traceMem = false;
+            }
+        }
+
+        public static Exception PerfFinalizer(MethodBase __originalMethod, State __state, Exception __exception)
+        {
+            if (__exception != null && _rootBucket != null)
+            {
+                var list = new List<KeyValuePair<MethodBase, (double sum, int n)>>(_rootBucket);
+                list.Sort((a, b) => b.Value.sum.CompareTo(a.Value.sum));
+                int take = Math.Min(8, list.Count);
+                var rOwner = _rootPeriodic?.DeclaringType?.FullName ?? "<global>";
+                var rName = _rootPeriodic?.Name ?? "<none>";
+                int printed = 0;
+                for (int i = 0; i < take; i++)
+                {
+                    var kv = list[i];
+                    if (kv.Value.sum < 1.0) break;
+                    if (printed++ == 0)
+                        MapPerfLog.Info($"[root-burst:EX] {rOwner}.{rName} — top children:");
+                    var o = kv.Key.DeclaringType?.FullName ?? "<global>";
+                    MapPerfLog.Info($"  ↳ {o}.{kv.Key.Name}  total {kv.Value.sum:F1} ms (n {kv.Value.n})");
+                }
+            }
+
+            // ensure depth + burst cleanup even if the original threw
+            if (--_callDepth <= 0)
+            {
+                _callDepth = 0;
+                _rootBucket = null;
+                _rootPeriodic = null;
+                _traceMem = false;
+            }
+            return __exception; // don't swallow
         }
 
         private static void PruneAllocCooldowns(double now)
@@ -535,6 +643,20 @@ namespace MapPerfProbe
             {
                 var s = list[i];
                 MapPerfLog.Info($"{s.Name,-48} avg {s.Avg:F1} ms | p95 {s.P95:F1} | max {s.Max:F1} | n {s.Count}");
+            }
+            // NEW: show top periodic roots (inclusive time over window)
+            if (!RootAgg.IsEmpty)
+            {
+                var roots = new List<KeyValuePair<MethodBase, double>>(RootAgg);
+                RootAgg.Clear();
+                roots.Sort((a, b) => b.Value.CompareTo(a.Value));
+                int rtake = Math.Min(5, roots.Count);
+                for (int i = 0; i < rtake; i++)
+                {
+                    var r = roots[i];
+                    var owner = r.Key.DeclaringType?.FullName ?? "<global>";
+                    MapPerfLog.Info($"[root] {owner}.{r.Key.Name}  total {r.Value:F1} ms");
+                }
             }
             if (_gcAgg[0] + _gcAgg[1] + _gcAgg[2] > 0)
             {
