@@ -15,9 +15,12 @@ namespace MapPerfProbe
 
         private static long _lastFrameTS = Stopwatch.GetTimestamp();
         private static readonly int[] _gcLast = new int[3];
+        private static readonly int[] _gcAgg = new int[3];
         private static double _nextFlush = 0.0;
         private static long _lastAlloc = GC.GetTotalMemory(false);
         private static long _lastWs = GetWS();
+        private static double _frameSpikeCD = 0.0;
+        private static double _memSpikeCD = 0.0;
 
         protected override void OnSubModuleLoad()
         {
@@ -58,15 +61,18 @@ namespace MapPerfProbe
             var nowTs = Stopwatch.GetTimestamp();
             double frameMs = (nowTs - _lastFrameTS) * 1000.0 / Stopwatch.Frequency;
             _lastFrameTS = nowTs;
-            if (frameMs > 25.0 && IsOnMap())
+            if (IsOnMap() && frameMs > 50.0 && _frameSpikeCD <= 0.0)
+            {
                 MapPerfLog.Warn($"FRAME spike {frameMs:F1} ms [{(IsPaused() ? "PAUSED" : "RUN")}]");
+                _frameSpikeCD = 1.0;
+            }
 
             for (int g = 0; g < 3; g++)
             {
                 int c = GC.CollectionCount(g);
-                if (c != _gcLast[g] && IsOnMap())
+                if (c != _gcLast[g])
                 {
-                    MapPerfLog.Info($"GC Gen{g} collections +{c - _gcLast[g]}");
+                    _gcAgg[g] += c - _gcLast[g];
                     _gcLast[g] = c;
                 }
             }
@@ -74,16 +80,26 @@ namespace MapPerfProbe
             var curAlloc = GC.GetTotalMemory(false);
             var allocDelta = curAlloc - _lastAlloc;
             _lastAlloc = curAlloc;
-            if (IsOnMap() && allocDelta > 5_000_000)
+            if (IsOnMap() && allocDelta > 25_000_000 && _memSpikeCD <= 0.0)
+            {
                 MapPerfLog.Warn($"ALLOC spike +{allocDelta / 1_000_000.0:F1} MB");
+                _memSpikeCD = 5.0;
+            }
 
             var ws = GetWS();
             var wsDelta = ws - _lastWs;
             _lastWs = ws;
-            if (IsOnMap() && wsDelta > 20_000_000)
+            if (IsOnMap() && wsDelta > 75_000_000 && _memSpikeCD <= 0.0)
+            {
                 MapPerfLog.Warn($"WS spike +{wsDelta / 1_000_000.0:F1} MB");
+                _memSpikeCD = 5.0;
+            }
 
             _nextFlush -= dt;
+            if (_frameSpikeCD > 0.0)
+                _frameSpikeCD = Math.Max(0.0, _frameSpikeCD - dt);
+            if (_memSpikeCD > 0.0)
+                _memSpikeCD = Math.Max(0.0, _memSpikeCD - dt);
             if (_nextFlush <= 0.0)
             {
                 _nextFlush = 2.0;
@@ -206,6 +222,11 @@ namespace MapPerfProbe
             {
                 var s = list[i];
                 MapPerfLog.Info($"{s.Name,-48} avg {s.Avg:F1} ms | p95 {s.P95:F1} | max {s.Max:F1} | n {s.Count}");
+            }
+            if (_gcAgg[0] + _gcAgg[1] + _gcAgg[2] > 0)
+            {
+                MapPerfLog.Info($"GC window: Gen0 +{_gcAgg[0]}, Gen1 +{_gcAgg[1]}, Gen2 +{_gcAgg[2]}");
+                _gcAgg[0] = _gcAgg[1] = _gcAgg[2] = 0;
             }
         }
 
