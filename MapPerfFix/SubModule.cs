@@ -2,8 +2,8 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using TaleWorlds.MountAndBlade;
 
 namespace MapPerfProbe
@@ -12,24 +12,21 @@ namespace MapPerfProbe
     {
         private const string HId = "mmq.mapperfprobe";
         private static readonly ConcurrentDictionary<MethodBase, PerfStat> Stats = new ConcurrentDictionary<MethodBase, PerfStat>();
-        private static string _logFile;
 
         private static long _lastFrameTS = Stopwatch.GetTimestamp();
         private static readonly int[] _gcLast = new int[3];
         private static double _nextFlush = 0.0;
+        private static long _lastAlloc = GC.GetTotalMemory(false);
+        private static long _lastWs = GetWS();
 
         protected override void OnSubModuleLoad()
         {
-            var root = AppDomain.CurrentDomain.BaseDirectory;
-            var logDir = Path.Combine(root, "Modules", "MapPerfProbe", "Log");
-            try { Directory.CreateDirectory(logDir); } catch { }
-            _logFile = Path.Combine(logDir, "probe.log");
-            Log("=== MapPerfProbe start ===");
+            MapPerfLog.Info("=== MapPerfProbe start ===");
 
             var harmony = CreateHarmony();
             if (harmony == null)
             {
-                Log("Harmony not found. Only frame/GC logging active.");
+                MapPerfLog.Warn("Harmony not found; only frame/GC logging.");
                 return;
             }
 
@@ -43,29 +40,48 @@ namespace MapPerfProbe
 
         protected override void OnSubModuleUnloaded()
         {
-            var harmony = CreateHarmony();
-            if (harmony != null) harmony.GetType().GetMethod("UnpatchAll", new[] { typeof(string) })?.Invoke(harmony, new object[] { HId });
+            try
+            {
+                var harmony = CreateHarmony();
+                harmony?.GetType().GetMethod("UnpatchAll", new[] { typeof(string) })?.Invoke(harmony, new object[] { HId });
+            }
+            catch (Exception ex)
+            {
+                MapPerfLog.Error("Unpatch error", ex);
+            }
             FlushSummary(force: true);
-            Log("=== MapPerfProbe stop ===");
+            MapPerfLog.Info("=== MapPerfProbe stop ===");
         }
 
         protected override void OnApplicationTick(float dt)
         {
-            var now = Stopwatch.GetTimestamp();
-            double ms = (now - _lastFrameTS) * 1000.0 / Stopwatch.Frequency;
-            _lastFrameTS = now;
-            if (ms > 25.0 && IsOnMap())
-                Log($"FRAME spike {ms:F1} ms [{(IsPaused() ? "PAUSED" : "RUN")}]");
+            var nowTs = Stopwatch.GetTimestamp();
+            double frameMs = (nowTs - _lastFrameTS) * 1000.0 / Stopwatch.Frequency;
+            _lastFrameTS = nowTs;
+            if (frameMs > 25.0 && IsOnMap())
+                MapPerfLog.Warn($"FRAME spike {frameMs:F1} ms [{(IsPaused() ? "PAUSED" : "RUN")}]");
 
             for (int g = 0; g < 3; g++)
             {
                 int c = GC.CollectionCount(g);
                 if (c != _gcLast[g] && IsOnMap())
                 {
-                    Log($"GC Gen{g} collections +{c - _gcLast[g]}");
+                    MapPerfLog.Info($"GC Gen{g} collections +{c - _gcLast[g]}");
                     _gcLast[g] = c;
                 }
             }
+
+            var curAlloc = GC.GetTotalMemory(false);
+            var allocDelta = curAlloc - _lastAlloc;
+            _lastAlloc = curAlloc;
+            if (IsOnMap() && allocDelta > 5_000_000)
+                MapPerfLog.Warn($"ALLOC spike +{allocDelta / 1_000_000.0:F1} MB");
+
+            var ws = GetWS();
+            var wsDelta = ws - _lastWs;
+            _lastWs = ws;
+            if (IsOnMap() && wsDelta > 20_000_000)
+                MapPerfLog.Warn($"WS spike +{wsDelta / 1_000_000.0:F1} MB");
 
             _nextFlush -= dt;
             if (_nextFlush <= 0.0)
@@ -73,6 +89,38 @@ namespace MapPerfProbe
                 _nextFlush = 2.0;
                 if (IsOnMap()) FlushSummary(force: false);
             }
+        }
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("psapi.dll")]
+        private static extern bool GetProcessMemoryInfo(IntPtr hProcess, out PROCESS_MEMORY_COUNTERS counters, int size);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_MEMORY_COUNTERS
+        {
+            public uint cb;
+            public uint PageFaultCount;
+            public ulong PeakWorkingSetSize;
+            public ulong WorkingSetSize;
+            public ulong QuotaPeakPagedPoolUsage;
+            public ulong QuotaPagedPoolUsage;
+            public ulong QuotaPeakNonPagedPoolUsage;
+            public ulong QuotaNonPagedPoolUsage;
+            public ulong PagefileUsage;
+            public ulong PeakPagefileUsage;
+        }
+
+        private static long GetWS()
+        {
+            try
+            {
+                if (GetProcessMemoryInfo(GetCurrentProcess(), out var counters, Marshal.SizeOf(typeof(PROCESS_MEMORY_COUNTERS))))
+                    return (long)counters.WorkingSetSize;
+            }
+            catch { }
+            return 0;
         }
 
         private static object CreateHarmony()
@@ -107,11 +155,11 @@ namespace MapPerfProbe
                 try
                 {
                     patchMi?.Invoke(harmony, new object[] { m, preHM, postHM, null, null });
-                    Log($"Patched {t.FullName}.{m.Name}");
+                    MapPerfLog.Info($"Patched {t.FullName}.{m.Name}");
                 }
                 catch (Exception ex)
                 {
-                    Log($"Patch fail {t.FullName}.{m.Name}: {ex.Message}");
+                    MapPerfLog.Error($"Patch fail {t.FullName}.{m.Name}", ex);
                 }
             }
         }
@@ -153,11 +201,11 @@ namespace MapPerfProbe
             if (list.Count == 0 && !force) return;
             list.Sort((a, b) => b.P95.CompareTo(a.P95));
             int take = Math.Min(8, list.Count);
-            Log($"-- bucket summary [{(IsPaused() ? "PAUSED" : "RUN")}] --");
+            MapPerfLog.Info($"-- bucket summary [{(IsPaused() ? "PAUSED" : "RUN")}] --");
             for (int i = 0; i < take; i++)
             {
                 var s = list[i];
-                Log($"{s.Name,-48} avg {s.Avg:F1} ms | p95 {s.P95:F1} | max {s.Max:F1} | n {s.Count}");
+                MapPerfLog.Info($"{s.Name,-48} avg {s.Avg:F1} ms | p95 {s.P95:F1} | max {s.Max:F1} | n {s.Count}");
             }
         }
 
@@ -177,12 +225,6 @@ namespace MapPerfProbe
             if (current == null) return false;
             var tcm = campT.GetProperty("TimeControlMode", BindingFlags.Public | BindingFlags.Instance)?.GetValue(current);
             return string.Equals(tcm?.ToString(), "Stop", StringComparison.Ordinal);
-        }
-
-        private static void Log(string line)
-        {
-            if (string.IsNullOrEmpty(_logFile)) return;
-            try { File.AppendAllText(_logFile, $"[{DateTime.Now:HH:mm:ss}] {line}\n"); } catch { }
         }
 
         private sealed class PerfStat
