@@ -7,7 +7,6 @@ using System.Linq;
 using System.Reflection;
 using TaleWorlds.CampaignSystem;
 using TaleWorlds.Core;
-using TaleWorlds.Library;
 using TaleWorlds.MountAndBlade;
 
 namespace MapPerfProbe
@@ -16,8 +15,7 @@ namespace MapPerfProbe
     {
         private static readonly Harmony H = new Harmony("mmq.mapperfprobe");
         private static readonly ConcurrentDictionary<MethodBase, PerfStat> Stats = new ConcurrentDictionary<MethodBase, PerfStat>();
-        private static readonly string LogDir = Path.Combine(BasePath.Name, "Modules", "MapPerfProbe", "Log");
-        private static readonly string LogFile = Path.Combine(LogDir, "probe.log");
+        private static string _logFile;
 
         private static long _lastFrameTS = Stopwatch.GetTimestamp();
         private static readonly int[] _gcLast = new int[3];
@@ -25,16 +23,17 @@ namespace MapPerfProbe
 
         protected override void OnSubModuleLoad()
         {
-            try { Directory.CreateDirectory(LogDir); }
+            var root = AppDomain.CurrentDomain.BaseDirectory;
+            var logDir = Path.Combine(root, "Modules", "MapPerfProbe", "Log");
+            try { Directory.CreateDirectory(logDir); }
             catch { /* ignore path issues */ }
+            _logFile = Path.Combine(logDir, "probe.log");
             Log("=== MapPerfProbe start ===");
 
             // Patch buckets: MapState ticks, CampaignEventDispatcher ticks, Gauntlet MapScreen ticks.
-            TryPatchType("TaleWorlds.CampaignSystem.GameState.MapState",
-                new[] { "OnTick", "OnMapModeTick", "OnFrameTick" });
+            TryPatchType("TaleWorlds.CampaignSystem.GameState.MapState", new[] {"OnTick","OnMapModeTick","OnFrameTick"});
 
-            TryPatchType("TaleWorlds.CampaignSystem.MapState",
-                new[] { "OnTick", "OnMapModeTick", "OnFrameTick" });
+            TryPatchType("TaleWorlds.CampaignSystem.MapState",          new[] {"OnTick","OnMapModeTick","OnFrameTick"});
 
             TryPatchType("TaleWorlds.CampaignSystem.CampaignEventDispatcher",
                 new[] { "OnTick", "OnHourlyTick", "OnDailyTick" });
@@ -45,6 +44,9 @@ namespace MapPerfProbe
             // Optional: UI context update (if present)
             TryPatchType("TaleWorlds.GauntletUI.UIContext",
                 new[] { "Update", "Tick" });
+
+            TryPatchType("TaleWorlds.GauntletUI.GauntletLayer",
+                new[] { "OnLateUpdate", "Tick" });
         }
 
         protected override void OnSubModuleUnloaded()
@@ -85,10 +87,9 @@ namespace MapPerfProbe
 
         private static bool IsOnMap()
         {
-            var state = GameStateManager.Current?.ActiveState;
-            if (state == null) return false;
-            var name = state.GetType().FullName ?? state.GetType().Name;
-            return name.EndsWith(".MapState", StringComparison.Ordinal) || name == "MapState";
+            var s = GameStateManager.Current?.ActiveState;
+            var n = s?.GetType().FullName ?? "";
+            return n.EndsWith(".MapState") || n == "MapState";
         }
 
         private static void TryPatchType(string typeName, string[] methodNames)
@@ -158,9 +159,10 @@ namespace MapPerfProbe
 
         private static void Log(string line)
         {
+            if (string.IsNullOrEmpty(_logFile)) return;
             try
             {
-                File.AppendAllText(LogFile, $"[{DateTime.Now:HH:mm:ss}] {line}\n");
+                File.AppendAllText(_logFile, $"[{DateTime.Now:HH:mm:ss}] {line}\n");
             }
             catch { /* ignore file IO errors */ }
         }
