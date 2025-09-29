@@ -52,7 +52,8 @@ namespace MapPerfProbe
 
         protected override void OnSubModuleUnloaded()
         {
-            Harmony.UnpatchAll(HId);
+            var harmony = new Harmony(HId);
+            harmony.UnpatchAll(HId);
             FlushSummary(force: true);
             Log("=== MapPerfProbe stop ===");
         }
