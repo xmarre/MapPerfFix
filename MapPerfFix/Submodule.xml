@@ -1,24 +1,24 @@
 <Module>
-	<Name value="MapPerfFix"/>
-	<Id value="MapPerfFix"/>
-	<Version value="1.0.0"/>
-	<SingleplayerModule value="true"/>
-	<Official value="false"/>
-	<DependedModules>
-		<DependedModule Id="Native"/>
-		<DependedModule Id="SandBoxCore"/>
-		<DependedModule Id="Sandbox"/>
-		<DependedModule Id="StoryMode"/>
-	</DependedModules>
-	<SubModules>
-		<SubModule>
-			<Name value="MapPerfFix SubModule"/>
-			<DLLName value="MapPerfFix.dll"/>
-			<SubModuleClassType value="MapPerfFix.SubModule"/>
-			<Tags>
-				<Tag key="DedicatedServerType" value="none"/>
-				<Tag key="IsNoRenderModeElement" value="false"/>
-			</Tags>
-		</SubModule>
-	</SubModules>
+  <Name value="MapPerfProbe"/>
+  <Id value="MapPerfProbe"/>
+  <Version value="1.0.0"/>
+  <SingleplayerModule value="true"/>
+  <Official value="false"/>
+  <DependedModules>
+    <DependedModule Id="Native"/>
+    <DependedModule Id="SandBoxCore"/>
+    <DependedModule Id="Sandbox"/>
+    <DependedModule Id="StoryMode"/>
+  </DependedModules>
+  <SubModules>
+    <SubModule>
+      <Name value="MapPerfProbe SubModule"/>
+      <DLLName value="MapPerfProbe.dll"/>
+      <SubModuleClassType value="MapPerfProbe.SubModule"/>
+      <Tags>
+        <Tag key="DedicatedServerType" value="none"/>
+        <Tag key="IsNoRenderModeElement" value="false"/>
+      </Tags>
+    </SubModule>
+  </SubModules>
 </Module>
