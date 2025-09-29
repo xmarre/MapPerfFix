@@ -33,12 +33,17 @@ namespace MapPerfProbe
                 return;
             }
 
+            // High-level map/UI hooks (already working)
             TryPatchType(harmony, "TaleWorlds.CampaignSystem.GameState.MapState", new[] { "OnTick", "OnMapModeTick", "OnFrameTick" });
             TryPatchType(harmony, "TaleWorlds.CampaignSystem.MapState",          new[] { "OnTick", "OnMapModeTick", "OnFrameTick" });
             TryPatchType(harmony, "TaleWorlds.CampaignSystem.CampaignEventDispatcher", new[] { "OnTick", "OnHourlyTick", "OnDailyTick" });
             TryPatchType(harmony, "SandBox.View.Map.MapScreen", new[] { "OnFrameTick", "Tick", "OnTick" });
             TryPatchType(harmony, "TaleWorlds.GauntletUI.UIContext", new[] { "Update", "Tick" });
             TryPatchType(harmony, "TaleWorlds.GauntletUI.GauntletLayer", new[] { "OnLateUpdate", "Tick" });
+
+            // 🔎 NEW: instrument the actual campaign behaviors that daily/hourly logic calls into
+            PatchBehaviorTicks(harmony);
+            PatchDispatcherFallback(harmony); // if type name shifted in your build, this still finds it
         }
 
         protected override void OnSubModuleUnloaded()
@@ -195,6 +200,98 @@ namespace MapPerfProbe
             }
             return Type.GetType(fullName, false);
         }
+
+        // -------- NEW: broad behavior/dispatcher instrumentation ----------
+        private static void PatchBehaviorTicks(object harmony)
+        {
+            var ht = harmony.GetType();
+            var hmType = Type.GetType("HarmonyLib.HarmonyMethod, 0Harmony", false);
+            var hmCtor = hmType?.GetConstructor(new[] { typeof(MethodInfo) });
+            var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
+
+            var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), BindingFlags.Static | BindingFlags.Public);
+            var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), BindingFlags.Static | BindingFlags.Public);
+            var preHM = hmCtor?.Invoke(new object[] { pre });
+            var postHM = hmCtor?.Invoke(new object[] { post });
+
+            string[] nameHits = { "DailyTick", "HourlyTick", "WeeklyTick", "OnDailyTick", "OnHourlyTick" };
+
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var an = asm.GetName().Name;
+                if (!(an.StartsWith("TaleWorlds") || an.StartsWith("SandBox"))) continue;
+
+                Type[] types;
+                try { types = asm.GetTypes(); } catch { continue; }
+
+                foreach (var t in types)
+                {
+                    if (!IsSubclassOfByName(t, "TaleWorlds.CampaignSystem.CampaignBehaviorBase")) continue;
+
+                    foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                    {
+                        if (!AnyNameMatch(m.Name, nameHits)) continue;
+                        if (m.ReturnType != typeof(void)) continue;
+                        if (m.GetParameters().Length > 2) continue;
+                        try
+                        {
+                            patchMi?.Invoke(harmony, new object[] { m, preHM, postHM, null, null });
+                            MapPerfLog.Info($"Patched {t.FullName}.{m.Name}");
+                        }
+                        catch (Exception ex)
+                        {
+                            MapPerfLog.Error($"Patch fail {t.FullName}.{m.Name}", ex);
+                        }
+                    }
+                }
+            }
+        }
+
+        private static void PatchDispatcherFallback(object harmony)
+        {
+            // Some builds rename/move the dispatcher; this scans for an obvious OnDaily/OnHourly hub.
+            var ht = harmony.GetType();
+            var hmType = Type.GetType("HarmonyLib.HarmonyMethod, 0Harmony", false);
+            var hmCtor = hmType?.GetConstructor(new[] { typeof(MethodInfo) });
+            var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
+
+            var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), BindingFlags.Static | BindingFlags.Public);
+            var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), BindingFlags.Static | BindingFlags.Public);
+            var preHM = hmCtor?.Invoke(new object[] { pre });
+            var postHM = hmCtor?.Invoke(new object[] { post });
+
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var an = asm.GetName().Name;
+                if (!an.StartsWith("TaleWorlds")) continue;
+                Type[] types; try { types = asm.GetTypes(); } catch { continue; }
+                foreach (var t in types)
+                {
+                    if (!t.FullName.Contains("Campaign") || !t.FullName.Contains("Dispatch")) continue;
+                    foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                    {
+                        if (!(m.Name == "OnDailyTick" || m.Name == "OnHourlyTick")) continue;
+                        if (m.ReturnType != typeof(void)) continue;
+                        if (m.GetParameters().Length > 2) continue;
+                        try { patchMi?.Invoke(harmony, new object[] { m, preHM, postHM, null, null }); MapPerfLog.Info($"Patched {t.FullName}.{m.Name}"); }
+                        catch (Exception ex) { MapPerfLog.Error($"Patch fail {t.FullName}.{m.Name}", ex); }
+                    }
+                }
+            }
+        }
+
+        private static bool IsSubclassOfByName(Type t, string baseFullName)
+        {
+            for (var cur = t; cur != null; cur = cur.BaseType) if (cur.FullName == baseFullName) return true;
+            return false;
+        }
+
+        private static bool AnyNameMatch(string name, string[] set)
+        {
+            for (int i = 0; i < set.Length; i++) if (name == set[i]) return true;
+            return false;
+        }
+        // -------------------------------------------------------------------
 
         public static void PerfPrefix(MethodBase __originalMethod, out long __state)
             => __state = Stopwatch.GetTimestamp();
