@@ -13,7 +13,7 @@ namespace MapPerfProbe
 {
     public class SubModule : MBSubModuleBase
     {
-        private static readonly Harmony H = new Harmony("mmq.mapperfprobe");
+        private const string HId = "mmq.mapperfprobe";
         private static readonly ConcurrentDictionary<MethodBase, PerfStat> Stats = new ConcurrentDictionary<MethodBase, PerfStat>();
         private static string _logFile;
 
@@ -23,6 +23,7 @@ namespace MapPerfProbe
 
         protected override void OnSubModuleLoad()
         {
+            var harmony = new Harmony(HId);
             var root = AppDomain.CurrentDomain.BaseDirectory;
             var logDir = Path.Combine(root, "Modules", "MapPerfProbe", "Log");
             try { Directory.CreateDirectory(logDir); }
@@ -31,27 +32,27 @@ namespace MapPerfProbe
             Log("=== MapPerfProbe start ===");
 
             // Patch buckets: MapState ticks, CampaignEventDispatcher ticks, Gauntlet MapScreen ticks.
-            TryPatchType("TaleWorlds.CampaignSystem.GameState.MapState", new[] {"OnTick","OnMapModeTick","OnFrameTick"});
+            TryPatchType(harmony, "TaleWorlds.CampaignSystem.GameState.MapState", new[] {"OnTick","OnMapModeTick","OnFrameTick"});
 
-            TryPatchType("TaleWorlds.CampaignSystem.MapState",          new[] {"OnTick","OnMapModeTick","OnFrameTick"});
+            TryPatchType(harmony, "TaleWorlds.CampaignSystem.MapState",          new[] {"OnTick","OnMapModeTick","OnFrameTick"});
 
-            TryPatchType("TaleWorlds.CampaignSystem.CampaignEventDispatcher",
+            TryPatchType(harmony, "TaleWorlds.CampaignSystem.CampaignEventDispatcher",
                 new[] { "OnTick", "OnHourlyTick", "OnDailyTick" });
 
-            TryPatchType("SandBox.View.Map.MapScreen",
+            TryPatchType(harmony, "SandBox.View.Map.MapScreen",
                 new[] { "OnFrameTick", "Tick", "OnTick" });
 
             // Optional: UI context update (if present)
-            TryPatchType("TaleWorlds.GauntletUI.UIContext",
+            TryPatchType(harmony, "TaleWorlds.GauntletUI.UIContext",
                 new[] { "Update", "Tick" });
 
-            TryPatchType("TaleWorlds.GauntletUI.GauntletLayer",
+            TryPatchType(harmony, "TaleWorlds.GauntletUI.GauntletLayer",
                 new[] { "OnLateUpdate", "Tick" });
         }
 
         protected override void OnSubModuleUnloaded()
         {
-            H.UnpatchAll("mmq.mapperfprobe");
+            Harmony.UnpatchAll(HId);
             FlushSummary(force: true);
             Log("=== MapPerfProbe stop ===");
         }
@@ -92,7 +93,7 @@ namespace MapPerfProbe
             return n.EndsWith(".MapState") || n == "MapState";
         }
 
-        private static void TryPatchType(string typeName, string[] methodNames)
+        private static void TryPatchType(Harmony harmony, string typeName, string[] methodNames)
         {
             var t = AccessTools.TypeByName(typeName);
             if (t == null) return;
@@ -108,7 +109,7 @@ namespace MapPerfProbe
 
                 try
                 {
-                    H.Patch(m,
+                    harmony.Patch(m,
                         prefix: new HarmonyMethod(typeof(SubModule), nameof(PerfPrefix)),
                         postfix: new HarmonyMethod(typeof(SubModule), nameof(PerfPostfix)));
                     Log($"Patched {t.FullName}.{m.Name}");
