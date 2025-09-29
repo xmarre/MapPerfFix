@@ -4,8 +4,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using TaleWorlds.CampaignSystem;
-using TaleWorlds.Core;
 using TaleWorlds.MountAndBlade;
 
 namespace MapPerfProbe
@@ -150,15 +148,20 @@ namespace MapPerfProbe
 
         private static bool IsOnMap()
         {
-            var s = GameStateManager.Current?.ActiveState;
-            var n = s?.GetType().FullName ?? "";
-            return n.EndsWith(".MapState") || n == "MapState";
+            var gsmType = Type.GetType("TaleWorlds.Core.GameStateManager, TaleWorlds.Core", throwOnError: false);
+            var current = gsmType?.GetProperty("Current", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+            var active = current?.GetType().GetProperty("ActiveState", BindingFlags.Public | BindingFlags.Instance)?.GetValue(current);
+            var name = active?.GetType().FullName ?? string.Empty;
+            return name.EndsWith(".MapState", StringComparison.Ordinal) || name == "MapState";
         }
 
         private static bool IsPaused()
         {
-            var camp = Campaign.Current;
-            return camp != null && camp.TimeControlMode == CampaignTimeControlMode.Stop;
+            var campT = Type.GetType("TaleWorlds.CampaignSystem.Campaign, TaleWorlds.CampaignSystem", false);
+            var current = campT?.GetProperty("Current", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+            if (current == null) return false;
+            var tcm = campT.GetProperty("TimeControlMode", BindingFlags.Public | BindingFlags.Instance)?.GetValue(current);
+            return string.Equals(tcm?.ToString(), "Stop", StringComparison.Ordinal);
         }
 
         private static void Log(string line)
