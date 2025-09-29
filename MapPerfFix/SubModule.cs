@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Reflection;
 using TaleWorlds.MountAndBlade;
 
@@ -100,7 +100,7 @@ namespace MapPerfProbe
 
             foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
             {
-                if (!methodNames.Contains(m.Name)) continue;
+                if (!NameIn(methodNames, m.Name)) continue;
                 if (m.ReturnType != typeof(void)) continue;
                 if (m.GetParameters().Length > 2) continue;
 
@@ -114,6 +114,12 @@ namespace MapPerfProbe
                     Log($"Patch fail {t.FullName}.{m.Name}: {ex.Message}");
                 }
             }
+        }
+
+        private static bool NameIn(string[] names, string s)
+        {
+            for (int i = 0; i < names.Length; i++) if (names[i] == s) return true;
+            return false;
         }
 
         private static Type FindType(string fullName)
@@ -138,12 +144,21 @@ namespace MapPerfProbe
 
         private static void FlushSummary(bool force)
         {
-            var top = Stats.Values.Select(s => s.SnapshotAndReset()).Where(s => s.Count > 0)
-                                  .OrderByDescending(s => s.P95).Take(8).ToList();
-            if (top.Count == 0 && !force) return;
+            var list = new List<Snapshot>();
+            foreach (var kv in Stats)
+            {
+                var snap = kv.Value.SnapshotAndReset();
+                if (snap.Count > 0) list.Add(snap);
+            }
+            if (list.Count == 0 && !force) return;
+            list.Sort((a, b) => b.P95.CompareTo(a.P95));
+            int take = Math.Min(8, list.Count);
             Log($"-- bucket summary [{(IsPaused() ? "PAUSED" : "RUN")}] --");
-            foreach (var s in top)
+            for (int i = 0; i < take; i++)
+            {
+                var s = list[i];
                 Log($"{s.Name,-48} avg {s.Avg:F1} ms | p95 {s.P95:F1} | max {s.Max:F1} | n {s.Count}");
+            }
         }
 
         private static bool IsOnMap()
