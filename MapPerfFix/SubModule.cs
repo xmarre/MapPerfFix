@@ -36,26 +36,34 @@ namespace MapPerfProbe
             _didPatch = true;
             MapPerfLog.Info("=== MapPerfProbe start ===");
 
-            var harmony = CreateHarmony();
-            if (harmony == null)
+            try
             {
-                MapPerfLog.Warn("Harmony not found; only frame/GC logging.");
-                _didPatch = false;
-                return;
+                var harmony = CreateHarmony();
+                if (harmony == null)
+                {
+                    MapPerfLog.Warn("Harmony not found; only frame/GC logging.");
+                    _didPatch = false;
+                    return;
+                }
+
+                // High-level map/UI hooks (already working)
+                SafePatch("TryPatchType(MapState)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.GameState.MapState", new[] { "OnTick", "OnMapModeTick", "OnFrameTick" }));
+                SafePatch("TryPatchType(MapState2)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.MapState", new[] { "OnTick", "OnMapModeTick", "OnFrameTick" }));
+                SafePatch("TryPatchType(CampaignEventDispatcher)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.CampaignEventDispatcher", new[] { "OnTick", "OnHourlyTick", "OnDailyTick" }));
+                SafePatch("TryPatchType(MapScreen)", () => TryPatchType(harmony, "SandBox.View.Map.MapScreen", new[] { "OnFrameTick", "Tick", "OnTick" }));
+                SafePatch("TryPatchType(UI)", () => TryPatchType(harmony, "TaleWorlds.GauntletUI.UIContext", new[] { "Update", "Tick" }));
+                SafePatch("TryPatchType(Layer)", () => TryPatchType(harmony, "TaleWorlds.GauntletUI.GauntletLayer", new[] { "OnLateUpdate", "Tick" }));
+
+                // 🔎 NEW: instrument the actual campaign behaviors that daily/hourly logic calls into
+                SafePatch("PatchBehaviorTicks", () => PatchBehaviorTicks(harmony));
+                SafePatch("PatchCampaignCoreTicks", () => PatchCampaignCoreTicks(harmony));
+                SafePatch("PatchDispatcherFallback", () => PatchDispatcherFallback(harmony));
             }
-
-            // High-level map/UI hooks (already working)
-            TryPatchType(harmony, "TaleWorlds.CampaignSystem.GameState.MapState", new[] { "OnTick", "OnMapModeTick", "OnFrameTick" });
-            TryPatchType(harmony, "TaleWorlds.CampaignSystem.MapState",          new[] { "OnTick", "OnMapModeTick", "OnFrameTick" });
-            TryPatchType(harmony, "TaleWorlds.CampaignSystem.CampaignEventDispatcher", new[] { "OnTick", "OnHourlyTick", "OnDailyTick" });
-            TryPatchType(harmony, "SandBox.View.Map.MapScreen", new[] { "OnFrameTick", "Tick", "OnTick" });
-            TryPatchType(harmony, "TaleWorlds.GauntletUI.UIContext", new[] { "Update", "Tick" });
-            TryPatchType(harmony, "TaleWorlds.GauntletUI.GauntletLayer", new[] { "OnLateUpdate", "Tick" });
-
-            // 🔎 NEW: instrument the actual campaign behaviors that daily/hourly logic calls into
-            PatchBehaviorTicks(harmony);
-            PatchCampaignCoreTicks(harmony);
-            PatchDispatcherFallback(harmony); // if type name shifted in your build, this still finds it
+            catch (Exception ex)
+            {
+                MapPerfLog.Error("OnSubModuleLoad fatal", ex);
+                _didPatch = false; // fail safe, keep game running
+            }
         }
 
         protected override void OnSubModuleUnloaded()
@@ -171,30 +179,55 @@ namespace MapPerfProbe
             return Activator.CreateInstance(ht, new object[] { HId });
         }
 
+        private static void SafePatch(string name, Action a)
+        {
+            try { a(); }
+            catch (Exception ex) { MapPerfLog.Error($"Patch phase failed: {name}", ex); }
+        }
+
+        private const BindingFlags HookBindingFlags = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+
         private static void TryPatchType(object harmony, string typeName, string[] methodNames)
         {
             var t = FindType(typeName);
             if (t == null) return;
 
             var ht = harmony.GetType();
-            var hmType = Type.GetType("HarmonyLib.HarmonyMethod, 0Harmony", throwOnError: false);
+            var harmonyAsm = ht.Assembly;
+            var hmType = harmonyAsm.GetType("HarmonyLib.HarmonyMethod")
+                        ?? Type.GetType($"HarmonyLib.HarmonyMethod, {harmonyAsm.FullName}", false);
             var hmCtor = hmType?.GetConstructor(new[] { typeof(MethodInfo) });
             var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
+            if (patchMi == null)
+            {
+                MapPerfLog.Error("Harmony Patch() method not found — aborting this patch phase.");
+                return;
+            }
 
-            var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), BindingFlags.Static | BindingFlags.Public);
-            var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), BindingFlags.Static | BindingFlags.Public);
-            var preHM = hmCtor?.Invoke(new object[] { pre });
-            var postHM = hmCtor?.Invoke(new object[] { post });
+            var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), HookBindingFlags);
+            var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), HookBindingFlags);
+            if (hmType == null || hmCtor == null || pre == null || post == null)
+            {
+                MapPerfLog.Error($"HarmonyMethod ctor or prefix/postfix not found (type={hmType != null}, ctor={hmCtor != null}, pre={pre != null}, post={post != null}).");
+                return;
+            }
+            var preHM = hmCtor.Invoke(new object[] { pre });
+            var postHM = hmCtor.Invoke(new object[] { post });
 
             foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
             {
                 if (!NameIn(methodNames, m.Name)) continue;
                 if (m.ReturnType != typeof(void)) continue;
-                if (m.GetParameters().Length > 2) continue;
+                if (m.IsAbstract || m.ContainsGenericParameters || m.DeclaringType?.IsGenericTypeDefinition == true) continue;
+                var ps = m.GetParameters();
+                if (ps.Length > 2) continue;
+                bool byref = false;
+                for (int i = 0; i < ps.Length; i++) if (ps[i].ParameterType.IsByRef) { byref = true; break; }
+                if (byref) continue;
 
                 try
                 {
-                    patchMi?.Invoke(harmony, new object[] { m, preHM, postHM, null, null });
+                    patchMi.Invoke(harmony, new object[] { m, preHM, postHM, null, null });
                     MapPerfLog.Info($"Patched {t.FullName}.{m.Name}");
                 }
                 catch (Exception ex)
@@ -224,14 +257,26 @@ namespace MapPerfProbe
         private static void PatchBehaviorTicks(object harmony)
         {
             var ht = harmony.GetType();
-            var hmType = Type.GetType("HarmonyLib.HarmonyMethod, 0Harmony", false);
+            var harmonyAsm = ht.Assembly;
+            var hmType = harmonyAsm.GetType("HarmonyLib.HarmonyMethod")
+                        ?? Type.GetType($"HarmonyLib.HarmonyMethod, {harmonyAsm.FullName}", false);
             var hmCtor = hmType?.GetConstructor(new[] { typeof(MethodInfo) });
             var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
+            if (patchMi == null)
+            {
+                MapPerfLog.Error("Harmony Patch() method not found — aborting this patch phase.");
+                return;
+            }
 
-            var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), BindingFlags.Static | BindingFlags.Public);
-            var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), BindingFlags.Static | BindingFlags.Public);
-            var preHM = hmCtor?.Invoke(new object[] { pre });
-            var postHM = hmCtor?.Invoke(new object[] { post });
+            var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), HookBindingFlags);
+            var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), HookBindingFlags);
+            if (hmType == null || hmCtor == null || pre == null || post == null)
+            {
+                MapPerfLog.Error($"HarmonyMethod ctor or prefix/postfix not found (type={hmType != null}, ctor={hmCtor != null}, pre={pre != null}, post={post != null}).");
+                return;
+            }
+            var preHM = hmCtor.Invoke(new object[] { pre });
+            var postHM = hmCtor.Invoke(new object[] { post });
 
             string[] nameHits = { "DailyTick", "HourlyTick", "WeeklyTick", "OnDailyTick", "OnHourlyTick" };
 
@@ -255,10 +300,15 @@ namespace MapPerfProbe
                     {
                         if (!AnyNameMatch(m.Name, nameHits)) continue;
                         if (m.ReturnType != typeof(void)) continue;
-                        if (m.GetParameters().Length > 2) continue;
+                        if (m.IsAbstract || m.ContainsGenericParameters || m.DeclaringType?.IsGenericTypeDefinition == true) continue;
+                        var ps = m.GetParameters();
+                        if (ps.Length > 2) continue;
+                        bool byref = false;
+                        for (int i = 0; i < ps.Length; i++) if (ps[i].ParameterType.IsByRef) { byref = true; break; }
+                        if (byref) continue;
                         try
                         {
-                            patchMi?.Invoke(harmony, new object[] { m, preHM, postHM, null, null });
+                            patchMi.Invoke(harmony, new object[] { m, preHM, postHM, null, null });
                             MapPerfLog.Info($"Patched {t.FullName}.{m.Name}");
                         }
                         catch (Exception ex)
@@ -273,14 +323,26 @@ namespace MapPerfProbe
         private static void PatchCampaignCoreTicks(object harmony)
         {
             var ht = harmony.GetType();
-            var hmType = Type.GetType("HarmonyLib.HarmonyMethod, 0Harmony", false);
+            var harmonyAsm = ht.Assembly;
+            var hmType = harmonyAsm.GetType("HarmonyLib.HarmonyMethod")
+                        ?? Type.GetType($"HarmonyLib.HarmonyMethod, {harmonyAsm.FullName}", false);
             var hmCtor = hmType?.GetConstructor(new[] { typeof(MethodInfo) });
             var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
+            if (patchMi == null)
+            {
+                MapPerfLog.Error("Harmony Patch() method not found — aborting this patch phase.");
+                return;
+            }
 
-            var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), BindingFlags.Static | BindingFlags.Public);
-            var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), BindingFlags.Static | BindingFlags.Public);
-            var preHM = hmCtor?.Invoke(new object[] { pre });
-            var postHM = hmCtor?.Invoke(new object[] { post });
+            var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), HookBindingFlags);
+            var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), HookBindingFlags);
+            if (hmType == null || hmCtor == null || pre == null || post == null)
+            {
+                MapPerfLog.Error($"HarmonyMethod ctor or prefix/postfix not found (type={hmType != null}, ctor={hmCtor != null}, pre={pre != null}, post={post != null}).");
+                return;
+            }
+            var preHM = hmCtor.Invoke(new object[] { pre });
+            var postHM = hmCtor.Invoke(new object[] { post });
 
             // Focused set: core campaign + party/settlement/AI/economy
             string[] typeHits =
@@ -328,9 +390,14 @@ namespace MapPerfProbe
                                        name.StartsWith("Update") || name.EndsWith("Update");
                         if (!nameHit) continue;
                         if (m.ReturnType != typeof(void)) continue;
-                        if (m.GetParameters().Length > 2) continue;
+                        if (m.IsAbstract || m.ContainsGenericParameters || m.DeclaringType?.IsGenericTypeDefinition == true) continue;
+                        var ps = m.GetParameters();
+                        if (ps.Length > 2) continue;
+                        bool byref = false;
+                        for (int i = 0; i < ps.Length; i++) if (ps[i].ParameterType.IsByRef) { byref = true; break; }
+                        if (byref) continue;
 
-                        try { patchMi?.Invoke(harmony, new object[] { m, preHM, postHM, null, null }); MapPerfLog.Info($"Patched {t.FullName}.{name}"); }
+                        try { patchMi.Invoke(harmony, new object[] { m, preHM, postHM, null, null }); MapPerfLog.Info($"Patched {t.FullName}.{name}"); }
                         catch (Exception ex) { MapPerfLog.Error($"Patch fail {t.FullName}.{name}", ex); }
                     }
                 }
@@ -341,14 +408,26 @@ namespace MapPerfProbe
         {
             // Some builds rename/move the dispatcher; this scans for an obvious OnDaily/OnHourly hub.
             var ht = harmony.GetType();
-            var hmType = Type.GetType("HarmonyLib.HarmonyMethod, 0Harmony", false);
+            var harmonyAsm = ht.Assembly;
+            var hmType = harmonyAsm.GetType("HarmonyLib.HarmonyMethod")
+                        ?? Type.GetType($"HarmonyLib.HarmonyMethod, {harmonyAsm.FullName}", false);
             var hmCtor = hmType?.GetConstructor(new[] { typeof(MethodInfo) });
             var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
+            if (patchMi == null)
+            {
+                MapPerfLog.Error("Harmony Patch() method not found — aborting this patch phase.");
+                return;
+            }
 
-            var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), BindingFlags.Static | BindingFlags.Public);
-            var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), BindingFlags.Static | BindingFlags.Public);
-            var preHM = hmCtor?.Invoke(new object[] { pre });
-            var postHM = hmCtor?.Invoke(new object[] { post });
+            var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), HookBindingFlags);
+            var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), HookBindingFlags);
+            if (hmType == null || hmCtor == null || pre == null || post == null)
+            {
+                MapPerfLog.Error($"HarmonyMethod ctor or prefix/postfix not found (type={hmType != null}, ctor={hmCtor != null}, pre={pre != null}, post={post != null}).");
+                return;
+            }
+            var preHM = hmCtor.Invoke(new object[] { pre });
+            var postHM = hmCtor.Invoke(new object[] { post });
 
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
             {
@@ -362,8 +441,13 @@ namespace MapPerfProbe
                     {
                         if (!(m.Name == "OnDailyTick" || m.Name == "OnHourlyTick")) continue;
                         if (m.ReturnType != typeof(void)) continue;
-                        if (m.GetParameters().Length > 2) continue;
-                        try { patchMi?.Invoke(harmony, new object[] { m, preHM, postHM, null, null }); MapPerfLog.Info($"Patched {t.FullName}.{m.Name}"); }
+                        if (m.IsAbstract || m.ContainsGenericParameters || m.DeclaringType?.IsGenericTypeDefinition == true) continue;
+                        var ps = m.GetParameters();
+                        if (ps.Length > 2) continue;
+                        bool byref = false;
+                        for (int i = 0; i < ps.Length; i++) if (ps[i].ParameterType.IsByRef) { byref = true; break; }
+                        if (byref) continue;
+                        try { patchMi.Invoke(harmony, new object[] { m, preHM, postHM, null, null }); MapPerfLog.Info($"Patched {t.FullName}.{m.Name}"); }
                         catch (Exception ex) { MapPerfLog.Error($"Patch fail {t.FullName}.{m.Name}", ex); }
                     }
                 }
@@ -383,9 +467,9 @@ namespace MapPerfProbe
         }
         // -------------------------------------------------------------------
 
-        private struct State { public long ts; public long mem; }
+        public struct State { public long ts; public long mem; }
 
-        private static void PerfPrefix(MethodBase __originalMethod, out State __state)
+        public static void PerfPrefix(MethodBase __originalMethod, out State __state)
         {
             __state = default;
             if ((Interlocked.Increment(ref _sample) & 0xF) == 0)
@@ -393,7 +477,7 @@ namespace MapPerfProbe
             __state.ts = Stopwatch.GetTimestamp();
         }
 
-        private static void PerfPostfix(MethodBase __originalMethod, State __state)
+        public static void PerfPostfix(MethodBase __originalMethod, State __state)
         {
             var dt = (Stopwatch.GetTimestamp() - __state.ts) * 1000.0 / Stopwatch.Frequency;
             var stat = Stats.GetOrAdd(__originalMethod, _ => new PerfStat(__originalMethod));
