@@ -81,7 +81,6 @@ namespace MapPerfProbe
                 _nextFlush = 2.0; // every ~2 real seconds
                 if (IsOnMap()) FlushSummary(force: false);
             }
-        }
 
         private static bool IsOnMap()
         {
