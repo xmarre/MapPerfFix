@@ -7,8 +7,8 @@
     <ProjectGuid>{5279B009-B8C7-44D4-B2AB-D34C7616F3D2}</ProjectGuid>
     <OutputType>Library</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>MapPerfFix</RootNamespace>
-    <AssemblyName>MapPerfFix</AssemblyName>
+    <RootNamespace>MapPerfProbe</RootNamespace>
+    <AssemblyName>MapPerfProbe</AssemblyName>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <Deterministic>true</Deterministic>
@@ -111,7 +111,7 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="Submodule.xml" />
+    <Content Include="SubModule.xml" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

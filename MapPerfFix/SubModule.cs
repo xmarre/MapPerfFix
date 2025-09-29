@@ -1,194 +1,224 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Net.NetworkInformation;
+using System.Reflection;
 using TaleWorlds.CampaignSystem;
-using TaleWorlds.CampaignSystem.Actions;
 using TaleWorlds.Core;
 using TaleWorlds.Library;
 using TaleWorlds.MountAndBlade;
 
-namespace MapPerfFix
+namespace MapPerfProbe
 {
     public class SubModule : MBSubModuleBase
     {
-        internal static readonly Harmony Harmony = new Harmony("mmq.mapperffix");
-        internal static readonly ConcurrentQueue<InformationMessage> MsgQueue = new ConcurrentQueue<InformationMessage>();
-        internal static DateTime LastFlushUtc = DateTime.UtcNow;
+        private static readonly Harmony H = new Harmony("mmq.mapperfprobe");
+        private static readonly ConcurrentDictionary<MethodBase, PerfStat> Stats = new ConcurrentDictionary<MethodBase, PerfStat>();
+        private static readonly string LogDir = Path.Combine(BasePath.Name, "Modules", "MapPerfProbe", "Log");
+        private static readonly string LogFile = Path.Combine(LogDir, "probe.log");
+
+        private static long _lastFrameTS = Stopwatch.GetTimestamp();
+        private static readonly int[] _gcLast = new int[3];
+        private static double _nextFlush = 0.0;
 
         protected override void OnSubModuleLoad()
         {
-            Harmony.Patch(
-                AccessTools.Method(typeof(InformationManager), nameof(InformationManager.DisplayMessage),
-                    new Type[] { typeof(InformationMessage) }),
-                prefix: new HarmonyMethod(typeof(SubModule), nameof(DisplayMessage_Prefix)));
+            try { Directory.CreateDirectory(LogDir); }
+            catch { /* ignore path issues */ }
+            Log("=== MapPerfProbe start ===");
+
+            // Patch buckets: MapState ticks, CampaignEventDispatcher ticks, Gauntlet MapScreen ticks.
+            TryPatchType("TaleWorlds.CampaignSystem.GameState.MapState",
+                new[] { "OnTick", "OnMapModeTick", "OnFrameTick" });
+
+            TryPatchType("TaleWorlds.CampaignSystem.MapState",
+                new[] { "OnTick", "OnMapModeTick", "OnFrameTick" });
+
+            TryPatchType("TaleWorlds.CampaignSystem.CampaignEventDispatcher",
+                new[] { "OnTick", "OnHourlyTick", "OnDailyTick" });
+
+            TryPatchType("SandBox.View.Map.MapScreen",
+                new[] { "OnFrameTick", "Tick", "OnTick" });
+
+            // Optional: UI context update (if present)
+            TryPatchType("TaleWorlds.GauntletUI.UIContext",
+                new[] { "Update", "Tick" });
         }
 
-        // Buffer UI messages to smooth daily bursts.
-        public static bool DisplayMessage_Prefix(InformationMessage msg)
+        protected override void OnSubModuleUnloaded()
         {
-            // Only buffer on campaign map. In missions, let it pass through.
-            if (GameStateManager.Current != null &&
-                GameStateManager.Current.ActiveState is MapState)
+            H.UnpatchAll("mmq.mapperfprobe");
+            FlushSummary(force: true);
+            Log("=== MapPerfProbe stop ===");
+        }
+
+        protected override void OnApplicationTick(float dt)
+        {
+            // Frame time sampling
+            var now = Stopwatch.GetTimestamp();
+            double ms = (now - _lastFrameTS) * 1000.0 / Stopwatch.Frequency;
+            _lastFrameTS = now;
+            if (ms > 25.0 && IsOnMap())
+                Log($"FRAME spike {ms:F1} ms [{(IsPaused() ? "PAUSED" : "RUN")}]");
+
+            // GC sampling
+            for (int g = 0; g < 3; g++)
             {
-                MsgQueue.Enqueue(msg);
-                return false;
+                int c = GC.CollectionCount(g);
+                if (c != _gcLast[g] && IsOnMap())
+                {
+                    Log($"GC Gen{g} collections +{c - _gcLast[g]}");
+                    _gcLast[g] = c;
+                }
             }
-            return true;
-        }
 
-        // Flush few messages per real-time second to avoid spikes.
-        internal static void TryFlushBufferedMessages(int maxPerFlush = 12)
-        {
-            var now = DateTime.UtcNow;
-            if ((now - LastFlushUtc).TotalMilliseconds < 800) return;
-            LastFlushUtc = now;
-            int n = 0;
-            InformationMessage m;
-            while (n < maxPerFlush && MsgQueue.TryDequeue(out m))
+            // Periodic aggregate flush
+            _nextFlush -= dt;
+            if (_nextFlush <= 0.0)
             {
-                InformationManager.DisplayMessage(m);
-                n++;
+                _nextFlush = 2.0; // every ~2 real seconds
+                if (IsOnMap()) FlushSummary(force: false);
             }
         }
 
-        protected override void OnGameStart(Game game, IGameStarter starterObj)
+        private static bool IsOnMap()
         {
-            if (game.GameType is Campaign)
-                (starterObj as CampaignGameStarter)?.AddBehavior(new MapPerfFixBehavior());
-        }
-    }
-
-    internal sealed class MapPerfFixBehavior : CampaignBehaviorBase
-    {
-        // Limits. Tune to taste.
-        private const int BanditCapGlobal = 160;    // hard cap across map
-        private const int BanditCapNearPlayer = 60; // within 250 map units of player
-        private const int CaravanCapPerClan = 2;    // caravans per non-player clan
-        private CampaignTime _nextDiag = CampaignTime.Hours(1f);
-
-        public override void RegisterEvents()
-        {
-            CampaignEvents.HourlyTickEvent.AddNonSerializedListener(this, OnHourly);
-            CampaignEvents.DailyTickEvent.AddNonSerializedListener(this, OnDaily);
-            CampaignEvents.OnGameLoadedEvent.AddNonSerializedListener(this, OnLoaded);
-            // Light per-frame smoother while on map
-            CampaignEvents.TickEvent.AddNonSerializedListener(this, OnTick);
+            var state = GameStateManager.Current?.ActiveState;
+            if (state == null) return false;
+            var name = state.GetType().FullName ?? state.GetType().Name;
+            return name.EndsWith(".MapState", StringComparison.Ordinal) || name == "MapState";
         }
 
-        public override void SyncData(IDataStore ds) { /* no state */ }
-
-        private void OnLoaded(CampaignGameStarter _)
+        private static void TryPatchType(string typeName, string[] methodNames)
         {
-            InformationManager.DisplayMessage(new InformationMessage("[MapPerfFix] Loaded."));
+            var t = AccessTools.TypeByName(typeName);
+            if (t == null) return;
+
+            foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (!methodNames.Contains(m.Name)) continue;
+                if (m.ReturnType != typeof(void)) continue;
+
+                // Accept 0-2 args; first may be float dt
+                var pars = m.GetParameters();
+                if (pars.Length > 2) continue;
+
+                try
+                {
+                    H.Patch(m,
+                        prefix: new HarmonyMethod(typeof(SubModule), nameof(PerfPrefix)),
+                        postfix: new HarmonyMethod(typeof(SubModule), nameof(PerfPostfix)));
+                    Log($"Patched {t.FullName}.{m.Name}");
+                }
+                catch (Exception ex)
+                {
+                    Log($"Patch fail {t.FullName}.{m.Name}: {ex.Message}");
+                }
+            }
         }
 
-        private void OnTick(float dt)
+        // Shared prefix/postfix with __state
+        public static void PerfPrefix(MethodBase __originalMethod, out long __state)
         {
-            // Drain message buffer a bit each real-time second.
-            SubModule.TryFlushBufferedMessages(10);
+            __state = Stopwatch.GetTimestamp();
         }
 
-        private void OnHourly()
+        public static void PerfPostfix(MethodBase __originalMethod, long __state)
+        {
+            var dt = (Stopwatch.GetTimestamp() - __state) * 1000.0 / Stopwatch.Frequency;
+            var stat = Stats.GetOrAdd(__originalMethod, _ => new PerfStat(__originalMethod));
+            stat.Add(dt);
+        }
+
+        private static void FlushSummary(bool force)
+        {
+            // Top offenders last window
+            var top = Stats.Values
+                .Select(s => s.SnapshotAndReset())
+                .Where(s => s.Count > 0)
+                .OrderByDescending(s => s.P95)
+                .Take(8)
+                .ToList();
+
+            if (top.Count == 0 && !force) return;
+
+            Log($"-- bucket summary [{(IsPaused() ? "PAUSED" : "RUN")}] --");
+            foreach (var s in top)
+                Log($"{s.Name,-48} avg {s.Avg:F1} ms | p95 {s.P95:F1} | max {s.Max:F1} | n {s.Count}");
+        }
+
+        private static bool IsPaused()
+        {
+            var camp = Campaign.Current;
+            if (camp == null) return false;
+            return camp.TimeControlMode == CampaignTimeControlMode.Stop;
+        }
+
+        private static void Log(string line)
         {
             try
             {
-                LimitBandits();
-                LimitCaravans();
-                if (CampaignTime.Now >= _nextDiag)
-                {
-                    _nextDiag = CampaignTime.Now + CampaignTime.Hours(3f);
-                    DiagnosticsPing();
-                }
+                File.AppendAllText(LogFile, $"[{DateTime.Now:HH:mm:ss}] {line}\n");
             }
-            catch (Exception ex)
+            catch { /* ignore file IO errors */ }
+        }
+
+        private sealed class PerfStat
+        {
+            private double _sum, _max;
+            private int _n;
+            private readonly double[] _ring = new double[128];
+            private int _i;
+            public string Name { get; }
+
+            public PerfStat(MethodBase m)
             {
-                InformationManager.DisplayMessage(new InformationMessage("[MapPerfFix] Hourly error: " + ex.Message));
+                Name = $"{m.DeclaringType.FullName}.{m.Name}";
             }
-        }
 
-        private void OnDaily()
-        {
-            // Extra flush after daily economy tick, when stutters often occur.
-            SubModule.TryFlushBufferedMessages(40);
-        }
-
-        private void DiagnosticsPing()
-        {
-            var all = MobileParty.All.Where(p => p?.Party != null && p.IsActive).ToList();
-            int total = all.Count;
-            int bandits = all.Count(p => p.IsBandit);
-            int caravans = all.Count(p => p.IsCaravan);
-            int armies = Army.Armies?.Count(a => a?.IsActive == true) ?? 0;
-
-            InformationManager.DisplayMessage(new InformationMessage(
-                $"[MPF] Parties: {total} | Bandits: {bandits} | Caravans: {caravans} | Armies: {armies}"));
-        }
-
-        private void LimitBandits()
-        {
-            var all = MobileParty.All.Where(p => p?.Party != null && p.IsActive && p.IsBandit).ToList();
-            if (all.Count <= BanditCapGlobal) return;
-
-            var player = MobileParty.MainParty;
-            var nearList = all.Where(p => p.Position2D.Distance(player.Position2D) < 250f).ToList();
-            var farList = all.Except(nearList).ToList();
-
-            // First trim far bandits until global cap met.
-            int toCull = Math.Max(0, all.Count - BanditCapGlobal);
-            if (toCull > 0)
+            public void Add(double ms)
             {
-                foreach (var p in farList
-                             .OrderByDescending(p => p.Party.MemberRoster.TotalManCount)
-                             .ThenByDescending(p => p.Party.PrisonRoster.TotalManCount)
-                             .Take(toCull))
-                {
-                    SafeDestroy(p);
-                }
+                _sum += ms;
+                if (ms > _max) _max = ms;
+                _ring[_i++ & 127] = ms;
+                _n++;
             }
 
-            // Then enforce a softer local cap near player.
-            if (nearList.Count > BanditCapNearPlayer)
+            public Snapshot SnapshotAndReset()
             {
-                int trim = nearList.Count - BanditCapNearPlayer;
-                foreach (var p in nearList
-                             .OrderByDescending(p => p.Position2D.Distance(player.Position2D))
-                             .ThenByDescending(p => p.Party.MemberRoster.TotalManCount)
-                             .Take(trim))
+                var cnt = Math.Min(_n, _ring.Length);
+                var arr = new double[cnt];
+                // copy last cnt samples
+                for (int k = 0; k < cnt; k++) arr[k] = _ring[(_i - 1 - k) & 127];
+                Array.Sort(arr);
+                double p95 = 0.0;
+                if (cnt > 0)
                 {
-                    SafeDestroy(p);
+                    int idx = (int)Math.Floor(cnt * 0.95) - 1;
+                    if (idx < 0) idx = 0;
+                    if (idx >= cnt) idx = cnt - 1;
+                    p95 = arr[idx];
                 }
+                var snap = new Snapshot
+                {
+                    Name = Name,
+                    Avg = _n > 0 ? _sum / _n : 0.0,
+                    Max = _max,
+                    P95 = p95,
+                    Count = _n
+                };
+                _sum = 0; _max = 0; _n = 0; // keep ring for continuity
+                return snap;
             }
         }
 
-        private void LimitCaravans()
+        private struct Snapshot
         {
-            // Too many caravans can spike economy ticks and pathfinding.
-            var caravans = MobileParty.All.Where(p => p?.Party != null && p.IsActive && p.IsCaravan).ToList();
-            foreach (var grp in caravans.GroupBy(c => c?.Owner?.Clan)
-                                        .Where(g => g.Key != null && !g.Key.IsPlayerClan && g.Count() > CaravanCapPerClan))
-            {
-                foreach (var c in grp.OrderByDescending(c => c.Position2D.Distance(MobileParty.MainParty.Position2D))
-                                     .Skip(CaravanCapPerClan))
-                {
-                    SafeDisbandCaravan(c);
-                }
-            }
-        }
-
-        private void SafeDestroy(MobileParty p)
-        {
-            try { DestroyPartyAction.Apply(null, p.Party); }
-            catch { /* ignore */ }
-        }
-
-        private void SafeDisbandCaravan(MobileParty p)
-        {
-            try { DestroyPartyAction.Apply(null, p.Party); }
-            catch { /* ignore */ }
+            public string Name;
+            public double Avg, Max, P95;
+            public int Count;
         }
     }
 }
