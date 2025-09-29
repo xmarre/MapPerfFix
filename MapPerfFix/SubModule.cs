@@ -385,7 +385,7 @@ namespace MapPerfProbe
 
         private struct State { public long ts; public long mem; }
 
-        public static void PerfPrefix(MethodBase __originalMethod, out State __state)
+        private static void PerfPrefix(MethodBase __originalMethod, out State __state)
         {
             __state = default;
             if ((Interlocked.Increment(ref _sample) & 0xF) == 0)
@@ -393,7 +393,7 @@ namespace MapPerfProbe
             __state.ts = Stopwatch.GetTimestamp();
         }
 
-        public static void PerfPostfix(MethodBase __originalMethod, State __state)
+        private static void PerfPostfix(MethodBase __originalMethod, State __state)
         {
             var dt = (Stopwatch.GetTimestamp() - __state.ts) * 1000.0 / Stopwatch.Frequency;
             var stat = Stats.GetOrAdd(__originalMethod, _ => new PerfStat(__originalMethod));
