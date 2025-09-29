@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 using TaleWorlds.MountAndBlade;
 
 namespace MapPerfProbe
@@ -12,6 +13,13 @@ namespace MapPerfProbe
     {
         private const string HId = "mmq.mapperfprobe";
         private static readonly ConcurrentDictionary<MethodBase, PerfStat> Stats = new ConcurrentDictionary<MethodBase, PerfStat>();
+        private static bool _didPatch;
+        private static readonly ConcurrentDictionary<MethodBase, double> _allocCd =
+            new ConcurrentDictionary<MethodBase, double>();
+        private const double AllocLogCooldown = 2.0;
+        private const double AllocLogTtl = 60.0;
+        private static double _nextAllocPrune;
+        private static int _sample;
 
         private static long _lastFrameTS = Stopwatch.GetTimestamp();
         private static readonly int[] _gcLast = new int[3];
@@ -24,12 +32,15 @@ namespace MapPerfProbe
 
         protected override void OnSubModuleLoad()
         {
+            if (_didPatch) return;
+            _didPatch = true;
             MapPerfLog.Info("=== MapPerfProbe start ===");
 
             var harmony = CreateHarmony();
             if (harmony == null)
             {
                 MapPerfLog.Warn("Harmony not found; only frame/GC logging.");
+                _didPatch = false;
                 return;
             }
 
@@ -43,6 +54,7 @@ namespace MapPerfProbe
 
             // 🔎 NEW: instrument the actual campaign behaviors that daily/hourly logic calls into
             PatchBehaviorTicks(harmony);
+            PatchCampaignCoreTicks(harmony);
             PatchDispatcherFallback(harmony); // if type name shifted in your build, this still finds it
         }
 
@@ -57,6 +69,7 @@ namespace MapPerfProbe
             {
                 MapPerfLog.Error("Unpatch error", ex);
             }
+            _didPatch = false;
             FlushSummary(force: true);
             MapPerfLog.Info("=== MapPerfProbe stop ===");
         }
@@ -69,6 +82,7 @@ namespace MapPerfProbe
             if (IsOnMap() && frameMs > 50.0 && _frameSpikeCD <= 0.0)
             {
                 MapPerfLog.Warn($"FRAME spike {frameMs:F1} ms [{(IsPaused() ? "PAUSED" : "RUN")}]");
+                if (frameMs > 200.0) FlushSummary(true);
                 _frameSpikeCD = 1.0;
             }
 
@@ -85,20 +99,25 @@ namespace MapPerfProbe
             var curAlloc = GC.GetTotalMemory(false);
             var allocDelta = curAlloc - _lastAlloc;
             _lastAlloc = curAlloc;
+
+            var ws = GetWS();
+            var wsDelta = ws - _lastWs;
+            _lastWs = ws;
+
             if (IsOnMap() && allocDelta > 25_000_000 && _memSpikeCD <= 0.0)
             {
                 MapPerfLog.Warn($"ALLOC spike +{allocDelta / 1_000_000.0:F1} MB");
                 _memSpikeCD = 5.0;
             }
 
-            var ws = GetWS();
-            var wsDelta = ws - _lastWs;
-            _lastWs = ws;
             if (IsOnMap() && wsDelta > 75_000_000 && _memSpikeCD <= 0.0)
             {
                 MapPerfLog.Warn($"WS spike +{wsDelta / 1_000_000.0:F1} MB");
                 _memSpikeCD = 5.0;
             }
+
+            if (allocDelta > 150_000_000 || wsDelta > 250_000_000)
+                FlushSummary(true);
 
             _nextFlush -= dt;
             if (_frameSpikeCD > 0.0)
@@ -227,6 +246,10 @@ namespace MapPerfProbe
                 foreach (var t in types)
                 {
                     if (!IsSubclassOfByName(t, "TaleWorlds.CampaignSystem.CampaignBehaviorBase")) continue;
+                    if (t.Namespace != null &&
+                        (t.Namespace.StartsWith("TaleWorlds.Gauntlet", StringComparison.Ordinal) ||
+                         t.Namespace.StartsWith("TaleWorlds.TwoDimension", StringComparison.Ordinal)))
+                        continue;
 
                     foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
                     {
@@ -242,6 +265,73 @@ namespace MapPerfProbe
                         {
                             MapPerfLog.Error($"Patch fail {t.FullName}.{m.Name}", ex);
                         }
+                    }
+                }
+            }
+        }
+
+        private static void PatchCampaignCoreTicks(object harmony)
+        {
+            var ht = harmony.GetType();
+            var hmType = Type.GetType("HarmonyLib.HarmonyMethod, 0Harmony", false);
+            var hmCtor = hmType?.GetConstructor(new[] { typeof(MethodInfo) });
+            var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
+
+            var pre = typeof(SubModule).GetMethod(nameof(PerfPrefix), BindingFlags.Static | BindingFlags.Public);
+            var post = typeof(SubModule).GetMethod(nameof(PerfPostfix), BindingFlags.Static | BindingFlags.Public);
+            var preHM = hmCtor?.Invoke(new object[] { pre });
+            var postHM = hmCtor?.Invoke(new object[] { post });
+
+            // Focused set: core campaign + party/settlement/AI/economy
+            string[] typeHits =
+            {
+                ".CampaignSystem.Campaign",
+                ".CampaignSystem.CampaignAiManager",
+                ".CampaignSystem.MobileParty",
+                ".CampaignSystem.Party.PartyAi",
+                ".CampaignSystem.Settlements.SettlementComponent",
+                ".CampaignSystem.Settlements.Town",
+                ".CampaignSystem.Settlements.Village",
+                ".CampaignSystem.Army",
+                ".CampaignSystem.Clan",
+                ".CampaignSystem.Kingdom",
+                ".CampaignSystem.Economy",
+                ".CampaignSystem.Pathfinding",
+            };
+
+            bool HitType(string full)
+            {
+                if (string.IsNullOrEmpty(full)) return false;
+                for (int i = 0; i < typeHits.Length; i++)
+                    if (full.Contains(typeHits[i])) return true;
+                return false;
+            }
+
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var an = asm.GetName().Name;
+                if (!an.StartsWith("TaleWorlds")) continue;
+                Type[] types; try { types = asm.GetTypes(); } catch { continue; }
+
+                foreach (var t in types)
+                {
+                    if (!HitType(t.FullName)) continue;
+                    if (t.Namespace != null &&
+                        (t.Namespace.StartsWith("TaleWorlds.Gauntlet", StringComparison.Ordinal) ||
+                         t.Namespace.StartsWith("TaleWorlds.TwoDimension", StringComparison.Ordinal)))
+                        continue;
+
+                    foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                    {
+                        var name = m.Name;
+                        bool nameHit = name == "Tick" || name.EndsWith("Tick") || name.StartsWith("Tick") ||
+                                       name.StartsWith("Update") || name.EndsWith("Update");
+                        if (!nameHit) continue;
+                        if (m.ReturnType != typeof(void)) continue;
+                        if (m.GetParameters().Length > 2) continue;
+
+                        try { patchMi?.Invoke(harmony, new object[] { m, preHM, postHM, null, null }); MapPerfLog.Info($"Patched {t.FullName}.{name}"); }
+                        catch (Exception ex) { MapPerfLog.Error($"Patch fail {t.FullName}.{name}", ex); }
                     }
                 }
             }
@@ -293,14 +383,56 @@ namespace MapPerfProbe
         }
         // -------------------------------------------------------------------
 
-        public static void PerfPrefix(MethodBase __originalMethod, out long __state)
-            => __state = Stopwatch.GetTimestamp();
+        private struct State { public long ts; public long mem; }
 
-        public static void PerfPostfix(MethodBase __originalMethod, long __state)
+        public static void PerfPrefix(MethodBase __originalMethod, out State __state)
         {
-            var dt = (Stopwatch.GetTimestamp() - __state) * 1000.0 / Stopwatch.Frequency;
+            __state = default;
+            if ((Interlocked.Increment(ref _sample) & 0xF) == 0)
+                __state.mem = GC.GetTotalMemory(false);
+            __state.ts = Stopwatch.GetTimestamp();
+        }
+
+        public static void PerfPostfix(MethodBase __originalMethod, State __state)
+        {
+            var dt = (Stopwatch.GetTimestamp() - __state.ts) * 1000.0 / Stopwatch.Frequency;
             var stat = Stats.GetOrAdd(__originalMethod, _ => new PerfStat(__originalMethod));
             stat.Add(dt);
+
+            if (__state.mem != 0)
+            {
+                var tNow = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
+                var alloc = GC.GetTotalMemory(false) - __state.mem;
+                if (alloc > 20_000_000)
+                {
+                    if (!_allocCd.TryGetValue(__originalMethod, out var next) || tNow >= next)
+                    {
+                        _allocCd[__originalMethod] = tNow + AllocLogCooldown;
+                        var owner = __originalMethod.DeclaringType?.FullName ?? "<global>";
+                        MapPerfLog.Warn($"ALLOC+ {alloc / 1_000_000.0:F1} MB @ {owner}.{__originalMethod.Name}");
+                    }
+                }
+
+                PruneAllocCooldowns(tNow);
+            }
+        }
+
+        private static void PruneAllocCooldowns(double now)
+        {
+            double scheduled;
+            do
+            {
+                scheduled = Volatile.Read(ref _nextAllocPrune);
+                if (scheduled > now) return;
+            }
+            while (Interlocked.CompareExchange(ref _nextAllocPrune, now + 10.0, scheduled) != scheduled);
+
+            foreach (var kv in _allocCd)
+            {
+                var lastLogTime = kv.Value - AllocLogCooldown;
+                if (now - lastLogTime > AllocLogTtl)
+                    _allocCd.TryRemove(kv.Key, out _);
+            }
         }
 
         private static void FlushSummary(bool force)
