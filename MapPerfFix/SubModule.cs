@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -35,6 +36,16 @@ namespace MapPerfProbe
         [ThreadStatic] private static bool _mapScreenFastTime;
         [ThreadStatic] private static bool _mapScreenFastTimeValid;
         [ThreadStatic] private static bool _mapScreenThrottleActive;
+        [ThreadStatic] private static bool _mapHotGate;
+        private static readonly ConcurrentDictionary<MethodBase, long> MapHotCooldowns =
+            new ConcurrentDictionary<MethodBase, long>();
+        private static long _mapHotLastPruneTs;
+        private static Func<long> _getAllocForThread;
+        private const double MapHotDurationMsThreshold = 2.0;
+        private const long MapHotAllocThresholdBytes = 256_000;
+        private const double MapHotCooldownSeconds = 0.05;
+        private const int MapHotCooldownPruneLimit = 2_000;
+        private const double MapHotCooldownPruneWindowMultiplier = 10.0;
         private const double RootChildBaseCutoffMs = 0.5;
         private const double RootBurstCooldownSeconds = 0.25;
         private static double _nextRootBurstAllowed;
@@ -74,6 +85,7 @@ namespace MapPerfProbe
         private static PropertyInfo _campaignCurrentProp;
         private static PropertyInfo _campaignTimeControlProp;
         private static readonly double TicksToMs = 1000.0 / Stopwatch.Frequency;
+        private const double BytesPerKiB = 1024.0;
 
         private static bool IsPeriodic(MethodBase m)
         {
@@ -136,9 +148,20 @@ namespace MapPerfProbe
                 SafePatch("TryPatchType(MapState)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.GameState.MapState", new[] { "OnTick", "OnMapModeTick", "OnFrameTick" }));
                 SafePatch("TryPatchType(MapState2)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.MapState", new[] { "OnTick", "OnMapModeTick", "OnFrameTick" }));
                 SafePatch("TryPatchType(CampaignEventDispatcher)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.CampaignEventDispatcher", new[] { "OnTick", "OnHourlyTick", "OnDailyTick" }));
+                SafePatch("Slice Daily/Hourly",
+                    () =>
+                    {
+                        TryPatchType(
+                            harmony,
+                            "TaleWorlds.CampaignSystem.CampaignEventDispatcher",
+                            new[] { "OnDailyTick", "OnHourlyTick" },
+                            prefix: typeof(SubModule).GetMethod(nameof(OnDailyTick_Prefix), HookBindingFlags),
+                            prefix2: typeof(SubModule).GetMethod(nameof(OnHourlyTick_Prefix), HookBindingFlags));
+                    });
                 SafePatch("TryPatchType(MapScreen)", () => TryPatchType(harmony, "SandBox.View.Map.MapScreen", new[] { "OnFrameTick", "Tick", "OnTick" }));
                 SafePatch("TryPatchType(UI)", () => TryPatchType(harmony, "TaleWorlds.GauntletUI.UIContext", new[] { "Update", "Tick" }));
                 SafePatch("TryPatchType(Layer)", () => TryPatchType(harmony, "TaleWorlds.GauntletUI.GauntletLayer", new[] { "OnLateUpdate", "Tick" }));
+                SafePatch("PatchMapScreenHotspots", () => PatchMapScreenHotspots(harmony));
 
                 // 🔎 NEW: instrument the actual campaign behaviors that daily/hourly logic calls into
                 SafePatch("PatchBehaviorTicks", () => PatchBehaviorTicks(harmony));
@@ -174,6 +197,12 @@ namespace MapPerfProbe
 
         protected override void OnApplicationTick(float dt)
         {
+            var desired = IsPaused() ? GCLatencyMode.Interactive : GCLatencyMode.SustainedLowLatency;
+            if (GCSettings.LatencyMode != desired)
+            {
+                try { GCSettings.LatencyMode = desired; }
+                catch { /* best-effort */ }
+            }
             var nowTs = Stopwatch.GetTimestamp();
             double frameMs = (nowTs - _lastFrameTS) * TicksToMs;
             _lastFrameTS = nowTs;
@@ -227,6 +256,10 @@ namespace MapPerfProbe
                 _nextFlush = 2.0;
                 if (IsOnMap()) FlushSummary(force: false);
             }
+
+            // Use leftover time at the end of the frame when actively on the campaign map
+            if (IsOnMap() && !IsPaused())
+                PeriodicSlicer.Pump(msBudget: 2.0);
         }
 
         [DllImport("kernel32.dll")]
@@ -341,6 +374,63 @@ namespace MapPerfProbe
             }
         }
 
+        private static void TryPatchType(object harmony, string fullName, string[] methodNames, MethodInfo prefix, MethodInfo prefix2)
+        {
+            if (prefix == null || prefix2 == null) return;
+            var t = FindType(fullName);
+            if (t == null) return;
+
+            var ht = harmony.GetType();
+            var harmonyAsm = ht.Assembly;
+            var hmType = harmonyAsm.GetType("HarmonyLib.HarmonyMethod")
+                        ?? Type.GetType($"HarmonyLib.HarmonyMethod, {harmonyAsm.FullName}", false);
+            var hmCtor = hmType?.GetConstructor(new[] { typeof(MethodInfo) });
+            var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
+            if (hmCtor == null || patchMi == null) return;
+
+            foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (!NameIn(methodNames, m.Name) || m.ReturnType != typeof(void)) continue;
+                var pre = string.Equals(m.Name, "OnDailyTick", StringComparison.OrdinalIgnoreCase)
+                    ? prefix
+                    : string.Equals(m.Name, "OnHourlyTick", StringComparison.OrdinalIgnoreCase)
+                        ? prefix2
+                        : null;
+                if (pre == null) continue;
+                var preHM = hmCtor.Invoke(new object[] { pre });
+                try
+                {
+                    var hmInstType = preHM?.GetType();
+                    var prProp = hmInstType?.GetProperty("priority");
+                    var prField = hmInstType?.GetField("priority");
+                    var targetType = prProp?.PropertyType ?? prField?.FieldType;
+                    object highest = 400;
+                    if (targetType != null && targetType.IsEnum)
+                        highest = Enum.ToObject(targetType, 400);
+                    try { if (prProp != null) prProp.SetValue(preHM, highest); } catch { }
+                    try { if (prField != null) prField.SetValue(preHM, highest); } catch { }
+                }
+                catch
+                {
+                    // best-effort priority bump
+                }
+                try
+                {
+                    patchMi.Invoke(harmony, new object[] { m, preHM, null, null, null });
+                }
+                catch (Exception ex)
+                {
+                    MapPerfLog.Error($"Slice patch fail {t.FullName}.{m.Name}", ex);
+                }
+            }
+        }
+
+        public static bool OnDailyTick_Prefix(object __instance)
+            => !PeriodicSlicer.RedirectDaily(__instance);
+
+        public static bool OnHourlyTick_Prefix(object __instance)
+            => !PeriodicSlicer.RedirectHourly(__instance);
+
         private static bool NameIn(string[] names, string s)
         {
             if (s == null) return false;
@@ -428,10 +518,12 @@ namespace MapPerfProbe
 
             if (string.Equals(methodName, "OnFrameTick", StringComparison.OrdinalIgnoreCase))
             {
+                _mapHotGate = true;
                 _mapScreenFastTimeValid = false;
                 _mapScreenThrottleActive = false;
                 if (__instance == null || IsPaused())
                 {
+                    _mapHotGate = false; // ensure no hotspot logging while paused/null
                     _skipMapOnFrameTick = false;
                     return true;
                 }
@@ -439,6 +531,7 @@ namespace MapPerfProbe
                 fastTime = IsFastTime();
                 _mapScreenFastTime = fastTime;
                 _mapScreenFastTimeValid = true;
+                _mapHotGate = fastTime; // only log hotspots while fast-time is active
                 if (!fastTime)
                 {
                     _skipMapOnFrameTick = false;
@@ -451,6 +544,7 @@ namespace MapPerfProbe
                     _mapScreenSkipFrames--;
                     _mapScreenThrottleActive = true;
                     _skipMapOnFrameTick = true;
+                    _mapHotGate = false;
                     return false;
                 }
 
@@ -468,6 +562,7 @@ namespace MapPerfProbe
             {
                 _mapScreenThrottleActive = false;
                 _skipMapOnFrameTick = false;
+                _mapHotGate = false;
                 return true;
             }
 
@@ -477,6 +572,7 @@ namespace MapPerfProbe
                 _mapScreenThrottleActive = false;
                 _skipMapOnFrameTick = false;
                 _mapScreenSkipFrames = 0;
+                _mapHotGate = false;
                 return true;
             }
 
@@ -484,10 +580,260 @@ namespace MapPerfProbe
             {
                 _mapScreenThrottleActive = true;
                 _skipMapOnFrameTick = true;
+                _mapHotGate = false;
                 return false;
             }
 
+            _mapHotGate = true;
             return true;
+        }
+
+        private static void InitAllocCounter()
+        {
+            if (Volatile.Read(ref _getAllocForThread) != null) return;
+
+            var mi = typeof(GC).GetMethod(
+                "GetAllocatedBytesForCurrentThread",
+                BindingFlags.Public | BindingFlags.Static);
+            if (mi == null) return;
+            if (mi.ReturnType != typeof(long) || mi.GetParameters().Length != 0) return;
+
+            try
+            {
+                var created = mi.CreateDelegate(typeof(Func<long>));
+                if (created is Func<long> func)
+                    Interlocked.CompareExchange(ref _getAllocForThread, func, null);
+            }
+            catch
+            {
+                // best-effort — fall back to total process allocs
+            }
+        }
+
+        private static long GetThreadAllocs()
+        {
+            var func = Volatile.Read(ref _getAllocForThread);
+            if (func == null)
+            {
+                InitAllocCounter();
+                func = Volatile.Read(ref _getAllocForThread);
+            }
+
+            if (func != null)
+            {
+                try { return func(); }
+                catch { Interlocked.Exchange(ref _getAllocForThread, null); }
+            }
+
+            return GC.GetTotalMemory(false);
+        }
+
+        public struct MapHotState
+        {
+            public long t0;
+            public long a0;
+        }
+
+        public static void MapHotPrefix(out MapHotState __state)
+        {
+            if (!_mapHotGate)
+            {
+                __state = default;
+                return;
+            }
+
+            __state.t0 = Stopwatch.GetTimestamp();
+            var func = Volatile.Read(ref _getAllocForThread);
+            if (func == null)
+            {
+                InitAllocCounter();
+                func = Volatile.Read(ref _getAllocForThread);
+            }
+
+            __state.a0 = func != null ? GetThreadAllocs() : 0;
+        }
+
+        public static void MapHotPostfix(MethodBase __originalMethod, MapHotState __state)
+        {
+            if (__state.t0 == 0 || __originalMethod == null) return;
+
+            var dtMs = (Stopwatch.GetTimestamp() - __state.t0) * TicksToMs;
+
+            long dAlloc = 0;
+            var allocFunc = Volatile.Read(ref _getAllocForThread);
+            var hasAllocCounter = false;
+            if (allocFunc != null)
+            {
+                dAlloc = GetThreadAllocs() - __state.a0;
+                if (dAlloc < 0) dAlloc = 0;
+                hasAllocCounter = Volatile.Read(ref _getAllocForThread) != null;
+            }
+
+            var durationThreshold = MapHotDurationMsThreshold;
+            var allocThreshold = MapHotAllocThresholdBytes;
+
+            if (hasAllocCounter)
+            {
+                if (dAlloc < allocThreshold && dtMs < durationThreshold) return;
+            }
+            else if (dtMs < durationThreshold)
+            {
+                return;
+            }
+
+            var nowTs = Stopwatch.GetTimestamp();
+            var cooldownTicks = (long)(Stopwatch.Frequency * MapHotCooldownSeconds);
+
+            if (cooldownTicks > 0 && MapHotCooldowns.Count > MapHotCooldownPruneLimit)
+            {
+                var lastPrune = Volatile.Read(ref _mapHotLastPruneTs);
+                if (nowTs - lastPrune >= cooldownTicks &&
+                    Interlocked.CompareExchange(ref _mapHotLastPruneTs, nowTs, lastPrune) == lastPrune)
+                {
+                    var pruneBefore = nowTs - (long)(cooldownTicks * MapHotCooldownPruneWindowMultiplier);
+                    foreach (var kvp in MapHotCooldowns)
+                    {
+                        if (kvp.Value < pruneBefore)
+                        {
+                            MapHotCooldowns.TryRemove(kvp.Key, out _);
+                        }
+                    }
+                }
+            }
+
+            var shouldLog = false;
+            var newDeadline = nowTs + cooldownTicks;
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                if (!MapHotCooldowns.TryGetValue(__originalMethod, out var next))
+                {
+                    if (MapHotCooldowns.TryAdd(__originalMethod, newDeadline))
+                    {
+                        shouldLog = true;
+                        break;
+                    }
+                    continue;
+                }
+
+                if (nowTs < next) break;
+
+                if (MapHotCooldowns.TryUpdate(__originalMethod, newDeadline, next))
+                {
+                    shouldLog = true;
+                    break;
+                }
+            }
+
+            if (shouldLog)
+            {
+                var owner = __originalMethod?.DeclaringType?.FullName ?? "<global>";
+                var name = __originalMethod?.Name ?? "<unknown>";
+                if (hasAllocCounter)
+                {
+                    MapPerfLog.Info(
+                        string.Format(
+                            CultureInfo.InvariantCulture,
+                            "[maphot] {0}.{1}  {2:F2} ms, +{3:F1} KiB",
+                            owner,
+                            name,
+                            dtMs,
+                            dAlloc / BytesPerKiB));
+                }
+                else
+                {
+                    MapPerfLog.Info(
+                        string.Format(
+                            CultureInfo.InvariantCulture,
+                            "[maphot] {0}.{1}  {2:F2} ms",
+                            owner,
+                            name,
+                            dtMs));
+                }
+            }
+        }
+
+        private static void PatchMapScreenHotspots(object harmony)
+        {
+            var mapT = GetMapScreenType();
+            if (mapT == null) return;
+
+            var ht = harmony.GetType();
+            var asm = ht.Assembly;
+            var hmType = asm.GetType("HarmonyLib.HarmonyMethod")
+                         ?? Type.GetType($"HarmonyLib.HarmonyMethod, {asm.FullName}", false);
+            var hmCtor = hmType?.GetConstructor(new[] { typeof(MethodInfo) });
+            var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
+            if (hmCtor == null || patchMi == null) return;
+
+            bool Hit(string n) => n != null &&
+                (n.IndexOf("icon", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 n.IndexOf("party", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 n.IndexOf("visual", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 n.IndexOf("effect", StringComparison.OrdinalIgnoreCase) >= 0);
+
+            var preHM = hmCtor.Invoke(new object[] { typeof(SubModule).GetMethod(nameof(MapHotPrefix), HookBindingFlags) });
+            var postHM = hmCtor.Invoke(new object[] { typeof(SubModule).GetMethod(nameof(MapHotPostfix), HookBindingFlags) });
+
+            var seen = new HashSet<MethodBase>();
+
+            void PatchType(Type t, BindingFlags flags)
+            {
+                var tn = t.Name;
+                if (tn != null && (tn.IndexOf("<>", StringComparison.Ordinal) >= 0 ||
+                                   tn.IndexOf("DisplayClass", StringComparison.OrdinalIgnoreCase) >= 0))
+                    return; // skip compiler-generated containers
+                MethodInfo[] methods;
+                try
+                {
+                    methods = t.GetMethods(flags);
+                }
+                catch { return; }
+
+                var declaredOnly = (flags & BindingFlags.DeclaredOnly) == BindingFlags.DeclaredOnly;
+
+                foreach (var m in methods)
+                {
+                    if (!seen.Add(m)) continue;
+                    if (declaredOnly && m.DeclaringType != t) continue;
+                    var dn = m.DeclaringType?.Name;
+                    if (dn != null && dn.IndexOf("d__", StringComparison.Ordinal) >= 0) continue;
+                    if (string.Equals(m.Name, "MoveNext", StringComparison.Ordinal)) continue;
+                    if (m.ReturnType != typeof(void)) continue;
+                    var n = m.Name;
+                    if (n != null && (n.StartsWith("get_", StringComparison.Ordinal) ||
+                                       n.StartsWith("set_", StringComparison.Ordinal) ||
+                                       n.StartsWith("add_", StringComparison.Ordinal) ||
+                                       n.StartsWith("remove_", StringComparison.Ordinal)))
+                        continue;
+                    if (!Hit(n)) continue;
+                    if (m.IsAbstract || m.ContainsGenericParameters) continue;
+                    MethodBody body;
+                    try { body = m.GetMethodBody(); }
+                    catch { continue; }
+                    if (body == null) continue;
+                    try { patchMi.Invoke(harmony, new object[] { m, preHM, postHM, null, null }); }
+                    catch (Exception ex) { MapPerfLog.Error($"MapHot patch fail {t.FullName}.{n}", ex); }
+                }
+            }
+
+            const BindingFlags DeclaredInstance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+            const BindingFlags InstanceAll = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            PatchType(mapT, DeclaredInstance);
+
+            for (var bt = mapT.BaseType; bt != null && bt != typeof(object); bt = bt.BaseType)
+            {
+                PatchType(bt, InstanceAll);
+            }
+            Type[] allTypes;
+            try { allTypes = mapT.Assembly.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { allTypes = ex.Types.Where(x => x != null).ToArray(); }
+            foreach (var nt in allTypes)
+            {
+                if (nt.Namespace == null) continue;
+                if (!nt.Namespace.StartsWith("SandBox", StringComparison.Ordinal)) continue;
+                if (Hit(nt.Name)) PatchType(nt, DeclaredInstance);
+            }
         }
 
         private static bool IsFastTime()
@@ -858,6 +1204,7 @@ namespace MapPerfProbe
                         CollectMapScreenStats(__instance, dt);
                         var fastTime = _mapScreenFastTimeValid ? _mapScreenFastTime : IsFastTime();
                         _mapScreenFastTimeValid = false;
+                        _mapHotGate = false;
                         if (fastTime)
                         {
                             if (dt >= MapScreenBackoffMs2)
@@ -869,6 +1216,7 @@ namespace MapPerfProbe
                     else if (methodName != null && MapScreenFrameHooks.Contains(methodName))
                     {
                         _mapScreenFastTimeValid = false;
+                        _mapHotGate = false;
                     }
                 }
             }
@@ -1571,5 +1919,208 @@ namespace MapPerfProbe
             }
         }
         private struct Snapshot { public string Name; public double Avg, Max, P95; public int Count; }
+    }
+
+    static class PeriodicSlicer
+    {
+        private static readonly Queue<Action> _q = new Queue<Action>(4096);
+        private static readonly object _lock = new object();
+        private static long _nextPumpLogTs;
+        private const double PumpLogCooldownSeconds = 0.5;
+
+        public static bool RedirectDaily(object dispatcher)
+            => Redirect(dispatcher, "OnDailyTick");
+
+        public static bool RedirectHourly(object dispatcher)
+            => Redirect(dispatcher, "OnHourlyTick");
+
+        private static bool Redirect(object dispatcher, string methodName)
+        {
+            try
+            {
+                if (dispatcher == null) return false;
+                var actions = DiscoverSubscriberActions(dispatcher, methodName);
+                if (actions.Count == 0) return false;
+
+                int enq = 0;
+                lock (_lock)
+                {
+                    const int MaxQueued = 20000;
+                    int room = Math.Max(0, MaxQueued - _q.Count);
+                    enq = Math.Min(room, actions.Count);
+                    for (int i = 0; i < enq; i++) _q.Enqueue(actions[i]);
+                    if (enq < actions.Count)
+                    {
+                        var dropped = actions.Count - enq;
+                        var shown = Math.Min(dropped, 5000);
+                        var suffix = dropped > shown ? "+" : string.Empty;
+                        MapPerfLog.Warn($"[slice] dropped {shown}{suffix} (queue full)");
+                    }
+                }
+                if (enq > 0)
+                {
+                    var shown = Math.Min(enq, 5000);
+                    var suffix = enq > shown ? "+" : string.Empty;
+                    MapPerfLog.Info($"[slice] queued {shown}{suffix} {methodName} handlers");
+                }
+                return enq > 0;
+            }
+            catch (Exception ex)
+            {
+                MapPerfLog.Error($"slice redirect {methodName} failed", ex);
+                return false;
+            }
+        }
+
+        public static void Pump(double msBudget = 2.0, int hardCap = 256)
+        {
+            if (msBudget <= 0.0) return;
+            lock (_lock)
+            {
+                if (_q.Count == 0) return;
+            }
+            long start = Stopwatch.GetTimestamp();
+            long ticksBudget = (long)(msBudget * (Stopwatch.Frequency / 1000.0));
+            int done = 0;
+
+            while (done < hardCap)
+            {
+                Action a = null;
+                lock (_lock)
+                {
+                    if (_q.Count == 0) break;
+                    a = _q.Dequeue();
+                }
+                try { a(); }
+                catch (Exception ex) { MapPerfLog.Error("[slice] handler error", ex); }
+                done++;
+                if ((Stopwatch.GetTimestamp() - start) > ticksBudget) break;
+            }
+
+            int remaining;
+            lock (_lock)
+            {
+                remaining = _q.Count;
+            }
+
+            if (done > 0 && (remaining == 0 || done >= 64))
+            {
+                var now = Stopwatch.GetTimestamp();
+                var nextAllowed = Volatile.Read(ref _nextPumpLogTs);
+                if (now >= nextAllowed)
+                {
+                    MapPerfLog.Info($"[slice] pumped {done} (rem {remaining})");
+                    Volatile.Write(ref _nextPumpLogTs,
+                        now + (long)(Stopwatch.Frequency * PumpLogCooldownSeconds));
+                }
+            }
+        }
+
+        private static List<Action> DiscoverSubscriberActions(object dispatcher, string methodName)
+        {
+            var ret = new List<Action>(256);
+            var t = dispatcher.GetType();
+            const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            void AddIfInvokable(object target)
+            {
+                if (target == null) return;
+
+                if (target is Delegate del)
+                {
+                    foreach (var one in del.GetInvocationList())
+                    {
+                        if (string.Equals(one.Method.Name, methodName, StringComparison.OrdinalIgnoreCase) &&
+                            one.Method.GetParameters().Length == 0)
+                        {
+                            try
+                            {
+                                var action = (Action)one.Method.CreateDelegate(typeof(Action), one.Target);
+                                ret.Add(action);
+                            }
+                            catch
+                            {
+                                var o = one;
+                                ret.Add(() => o.DynamicInvoke(Array.Empty<object>()));
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                var mi = target.GetType().GetMethod(methodName, F, null, Type.EmptyTypes, null);
+                if (mi != null && !mi.IsAbstract)
+                {
+                    try
+                    {
+                        var action = (Action)mi.CreateDelegate(typeof(Action), target);
+                        ret.Add(action);
+                    }
+                    catch
+                    {
+                        ret.Add(() => mi.Invoke(target, null));
+                    }
+                }
+            }
+
+            bool NameLooksRelevant(string n)
+                => n != null && (n.IndexOf("daily", StringComparison.OrdinalIgnoreCase) >= 0
+                                 || n.IndexOf("hourly", StringComparison.OrdinalIgnoreCase) >= 0
+                                 || n.IndexOf("tick", StringComparison.OrdinalIgnoreCase) >= 0
+                                 || n.IndexOf("subscriber", StringComparison.OrdinalIgnoreCase) >= 0);
+
+            foreach (var f in t.GetFields(F))
+            {
+                if (!NameLooksRelevant(f.Name)) continue;
+                var val = f.GetValue(dispatcher);
+                TryExpand(val, AddIfInvokable);
+            }
+
+            foreach (var p in t.GetProperties(F))
+            {
+                if (p.GetIndexParameters().Length != 0) continue;
+                if (!NameLooksRelevant(p.Name)) continue;
+                object val = null;
+                try { val = p.GetValue(dispatcher, null); }
+                catch { }
+                TryExpand(val, AddIfInvokable);
+            }
+
+            if (ret.Count == 0)
+            {
+                foreach (var f in t.GetFields(F))
+                    TryExpand(f.GetValue(dispatcher), AddIfInvokable);
+            }
+
+            return ret;
+        }
+
+        private static void TryExpand(object container, Action<object> accept)
+        {
+            if (container == null) return;
+
+            accept(container);
+
+            if (container is string)
+                return;
+
+            if (container is System.Collections.IEnumerable en)
+            {
+                foreach (var item in en) accept(item);
+                return;
+            }
+
+            var t = container.GetType();
+            var idxProp = t.GetProperty("Values", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (idxProp != null)
+            {
+                try
+                {
+                    if (idxProp.GetValue(container) is System.Collections.IEnumerable vals)
+                        foreach (var v in vals) accept(v);
+                }
+                catch { }
+            }
+        }
     }
 }
