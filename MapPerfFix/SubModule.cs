@@ -407,6 +407,8 @@ namespace MapPerfProbe
             var methodName = __originalMethod?.Name;
             if (methodName == null) return true;
 
+            var fastTime = false;
+
             if (string.Equals(methodName, "OnFrameTick", StringComparison.OrdinalIgnoreCase))
             {
                 _mapScreenFastTimeValid = false;
@@ -417,7 +419,7 @@ namespace MapPerfProbe
                     return true;
                 }
 
-                var fastTime = IsFastTime();
+                fastTime = IsFastTime();
                 _mapScreenFastTime = fastTime;
                 _mapScreenFastTimeValid = true;
                 if (!fastTime)
@@ -452,7 +454,7 @@ namespace MapPerfProbe
                 return true;
             }
 
-            var fastTime = hadFastTime ? cachedFastTime : IsFastTime();
+            fastTime = hadFastTime ? cachedFastTime : IsFastTime();
             if (!fastTime)
             {
                 _mapScreenThrottleActive = false;
@@ -1371,7 +1373,7 @@ namespace MapPerfProbe
                     case ushort us:
                         return us;
                     case short s:
-                        return Math.Max(0, s);
+                        return Math.Max(0, (int)s);
                     case byte b:
                         return b;
                 }
