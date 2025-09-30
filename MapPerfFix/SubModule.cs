@@ -130,7 +130,7 @@ namespace MapPerfProbe
 
                 // IMPORTANT: throttle patch must be applied before broad instrumentation,
                 // so its bool-prefix can skip the original when needed.
-                PatchMapScreenThrottle(harmony);
+                SafePatch("PatchMapScreenThrottle", () => PatchMapScreenThrottle(harmony));
 
                 // High-level map/UI hooks (already working)
                 SafePatch("TryPatchType(MapState)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.GameState.MapState", new[] { "OnTick", "OnMapModeTick", "OnFrameTick" }));
@@ -354,50 +354,67 @@ namespace MapPerfProbe
         // --- Targeted perf tweak: throttle MapScreen.OnFrameTick under load ---
         private static void PatchMapScreenThrottle(object harmony)
         {
-            var ht = harmony.GetType();
-            var harmonyAsm = ht.Assembly;
-            var hmType = harmonyAsm.GetType("HarmonyLib.HarmonyMethod")
-                        ?? Type.GetType($"HarmonyLib.HarmonyMethod, {harmonyAsm.FullName}", false);
-            var hmCtor = hmType?.GetConstructor(new[] { typeof(MethodInfo) });
-            var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
-            if (patchMi == null || hmCtor == null || hmType == null) return;
-
-            var mapT = GetMapScreenType();
-            if (mapT == null) return;
-            var pre = typeof(SubModule).GetMethod(nameof(MapScreenOnFrameTickPrefix), HookBindingFlags);
-            if (pre == null) return;
-
-            foreach (var name in MapScreenFrameHooks)
+            try
             {
-                var target = mapT.GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                if (target == null) continue;
+                var ht = harmony.GetType();
+                var harmonyAsm = ht.Assembly;
+                var hmType = harmonyAsm.GetType("HarmonyLib.HarmonyMethod")
+                            ?? Type.GetType($"HarmonyLib.HarmonyMethod, {harmonyAsm.FullName}", false);
+                var hmCtor = hmType?.GetConstructor(new[] { typeof(MethodInfo) });
+                var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
+                if (patchMi == null || hmCtor == null || hmType == null) return;
 
-                var preHM = hmCtor.Invoke(new object[] { pre });
-                var prioProp = hmType.GetProperty("priority", BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
-                var prioField = hmType.GetField("priority", BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
-                var prioEnum = harmonyAsm.GetType("HarmonyLib.Priority");
-                var highest = prioEnum != null ? Enum.ToObject(prioEnum, 400) : (object)400; // Harmony v2+ enum or raw int fallback
-                if (prioProp != null)
-                {
-                    try { prioProp.SetValue(preHM, highest); }
-                    catch { /* ignore Harmony variants without setter */ }
-                }
-                if (prioField != null)
-                {
-                    try { prioField.SetValue(preHM, highest); }
-                    catch { /* ignore Harmony variants without setter */ }
-                }
+                var mapT = GetMapScreenType();
+                if (mapT == null) return;
+                var pre = typeof(SubModule).GetMethod(nameof(MapScreenOnFrameTickPrefix), HookBindingFlags);
+                if (pre == null) return;
 
-                try
+                foreach (var name in MapScreenFrameHooks)
                 {
-                    // no postfix/finalizer here – we only gate execution
+                    var target = mapT.GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (target == null) continue;
+
+                    var preHM = hmCtor.Invoke(new object[] { pre });
+
+                    // Try to set highest priority, but only if the shape matches
+                    try
+                    {
+                        var prioProp = hmType.GetProperty("priority", BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+                        var prioField = hmType.GetField("priority", BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+
+                        object highestBoxed = 400; // default to int
+                        var prioEnum = harmonyAsm.GetType("HarmonyLib.Priority");
+                        if (prioEnum != null && prioEnum.IsEnum)
+                        {
+                            try { highestBoxed = Enum.ToObject(prioEnum, 400); }
+                            catch { highestBoxed = 400; }
+                        }
+
+                        if (prioProp != null)
+                        {
+                            var pt = prioProp.PropertyType;
+                            if (pt.IsEnum) prioProp.SetValue(preHM, highestBoxed);
+                            else if (pt == typeof(int)) prioProp.SetValue(preHM, 400);
+                        }
+                        if (prioField != null)
+                        {
+                            var ft = prioField.FieldType;
+                            if (ft.IsEnum) prioField.SetValue(preHM, highestBoxed);
+                            else if (ft == typeof(int)) prioField.SetValue(preHM, 400);
+                        }
+                    }
+                    catch
+                    {
+                        /* priority is best-effort; ignore shape mismatches */
+                    }
+
                     patchMi.Invoke(harmony, new object[] { target, preHM, null, null, null });
                     MapPerfLog.Info($"Patched MapScreen.{name} (throttle)");
                 }
-                catch (Exception ex)
-                {
-                    MapPerfLog.Error($"Patch fail MapScreen.{name} (throttle)", ex);
-                }
+            }
+            catch (Exception ex)
+            {
+                MapPerfLog.Error("PatchMapScreenThrottle failed", ex);
             }
         }
 
@@ -1365,7 +1382,7 @@ namespace MapPerfProbe
                 switch (raw)
                 {
                     case int i:
-                        return Math.Max(0, i);
+                        return i >= 0 ? i : 0;
                     case long l:
                         return ToInt(l);
                     case uint ui:
@@ -1373,7 +1390,7 @@ namespace MapPerfProbe
                     case ushort us:
                         return us;
                     case short s:
-                        return Math.Max(0, (int)s);
+                        return s >= 0 ? (int)s : 0;
                     case byte b:
                         return b;
                 }
