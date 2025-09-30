@@ -130,7 +130,8 @@ namespace MapPerfProbe
         private static Type _campaignType;
         private static PropertyInfo _campaignCurrentProp;
         private static PropertyInfo _campaignTimeControlProp;
-        private static readonly double TicksToMs = 1000.0 / Stopwatch.Frequency;
+        private static readonly double TicksToMsConst = 1000.0 / Stopwatch.Frequency;
+        internal static double TicksToMs => TicksToMsConst;
         private const double BytesPerKiB = 1024.0;
 
         private struct AllocWarnBudget
@@ -419,7 +420,7 @@ namespace MapPerfProbe
             // Drain slices even while paused to avoid backlog cliffs
             if (onMap)
             {
-                var budget = paused ? 3.0 : (IsFastTime() ? 7.0 : 4.0);
+                var budget = paused ? 16.0 : (IsFastTime() ? 10.0 : 2.0);
                 PeriodicSlicer.Pump(msBudget: budget);
             }
         }
@@ -2243,6 +2244,17 @@ namespace MapPerfProbe
             return $"{owner}.{name}";
         }
 
+        internal static bool IsFastOrPaused()
+        {
+            return IsFastTime() || !IsOnMapRunning();
+        }
+
+        internal static bool IsOnMapRunning()
+        {
+            if (!IsOnMap()) return false;
+            return !IsPaused();
+        }
+
         private static bool IsOnMap()
         {
             try
@@ -2342,17 +2354,64 @@ namespace MapPerfProbe
 
     static class PeriodicSlicer
     {
-        private static readonly Queue<Action> _q = new Queue<Action>(4096);
+        // Sliced handlers (safe anytime) and hub fallbacks (only when paused/fast-time)
+        private static readonly Queue<Action> _qHandlers = new Queue<Action>(4096);
+        private static readonly Queue<Action> _qHubs = new Queue<Action>(512);
+        private static readonly HashSet<string> _pending = new HashSet<string>(StringComparer.Ordinal);
+        // store deferred hub fallbacks so we can enqueue them later when safe
+        private static readonly Dictionary<string, Action> _deferred = new Dictionary<string, Action>(StringComparer.Ordinal);
+        private const int DeferredMax = 8192;
+        private static readonly object _pendingLock = new object();
         private static readonly object _lock = new object();
+        private const int MaxQueued = 20000;
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<MethodBase, int> _bypass
             = new System.Collections.Concurrent.ConcurrentDictionary<MethodBase, int>();
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _recentHubs
-            = new System.Collections.Concurrent.ConcurrentDictionary<string, long>();
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, long>(StringComparer.Ordinal);
         private static long _nextPumpLogTs;
         private static long _nextQueuePressureLogTs;
         private const double PumpLogCooldownSeconds = 0.5;
         private const double QueuePressureCooldownSeconds = 0.5;
         private const int QueuePressureThreshold = 15_000;
+
+        private static string HubKey(MethodBase mi, object inst = null)
+        {
+            if (mi == null) return string.Empty;
+            var owner = mi.DeclaringType?.FullName ?? string.Empty;
+            // intentionally no instance id
+            return string.Concat(owner, ":", mi.Name);
+        }
+
+        // requires _pendingLock
+        private static void TrimDeferred_NoLock()
+        {
+            if (_deferred.Count <= DeferredMax) return;
+            int toRemove = _deferred.Count - DeferredMax;
+            foreach (var key in _deferred.Keys.ToArray())
+            {
+                _deferred.Remove(key);
+                if (--toRemove <= 0) break;
+            }
+            MapPerfLog.Warn($"[slice] trimmed deferred to {DeferredMax}");
+        }
+
+        // requires _pendingLock AND _lock held (in that order)
+        private static void MoveDeferredToHubQueue_NoLocks()
+        {
+            if (_deferred.Count == 0) return;
+            int room = Math.Max(0, MaxQueued - (_qHandlers.Count + _qHubs.Count));
+            if (room == 0) return;
+            foreach (var kv in _deferred.ToArray())
+            {
+                var key = kv.Key;
+                var action = kv.Value;
+                if (_pending.Contains(key)) continue;
+                if (room-- == 0) break;
+                _pending.Add(key);
+                _qHubs.Enqueue(action);
+                _deferred.Remove(key);
+            }
+        }
 
         private readonly struct HandlerKey : IEquatable<HandlerKey>
         {
@@ -2453,10 +2512,13 @@ namespace MapPerfProbe
                         !mi.IsAbstract && !mi.ContainsGenericParameters &&
                         mi.GetParameters().Length == 0)
                     {
-                        var key = $"{dispatcher.GetType().FullName}:{mi.Name}#{RuntimeHelpers.GetHashCode(dispatcher)}";
-                        if (!EnqueueOnce(key, 50.0)) return true; // recently queued
-                        Action call = () =>
+                        var key = HubKey(mi, dispatcher);
+                        if (!EnqueueOnce(key, 200.0)) return true; // recently queued
+                        var fastOrPaused = SubModule.IsFastOrPaused();
+
+                        void InvokeFallback()
                         {
+                            var start = Stopwatch.GetTimestamp();
                             EnterBypass(hub);
                             try
                             {
@@ -2469,9 +2531,48 @@ namespace MapPerfProbe
                             finally
                             {
                                 ExitBypass(hub);
+                                var elapsed = Stopwatch.GetTimestamp() - start;
+                                var elapsedMs = elapsed * SubModule.TicksToMs;
+                                var stateFastOrPaused = SubModule.IsFastOrPaused();
+                                lock (_pendingLock)
+                                {
+                                    _pending.Remove(key);
+                                    if (!stateFastOrPaused && elapsedMs > 8.0)
+                                    {
+                                        TrimDeferred_NoLock();
+                                        _deferred[key] = InvokeFallback; // throttle future while RUN
+                                    }
+                                    else
+                                    {
+                                        _deferred.Remove(key);
+                                    }
+                                }
                             }
-                        };
-                        lock (_lock) _q.Enqueue(call);
+                        }
+
+                        lock (_pendingLock)
+                        {
+                            if (_pending.Contains(key)) return true;
+                            if (!fastOrPaused)
+                            {
+                                TrimDeferred_NoLock();
+                                _deferred[key] = InvokeFallback; // store for later
+                                return true;
+                            }
+                            _pending.Add(key);
+                            // Lock order invariant: _pendingLock must be held before _lock.
+                            lock (_lock)
+                            {
+                                if (_qHandlers.Count + _qHubs.Count >= MaxQueued)
+                                {
+                                    _pending.Remove(key);
+                                    TrimDeferred_NoLock();
+                                    _deferred[key] = InvokeFallback; // back off
+                                    return true;
+                                }
+                                _qHubs.Enqueue(InvokeFallback);
+                            }
+                        }
                         MapPerfLog.Info($"[slice] queued 1 {mi.Name} (hub fallback)");
                         return true;
                     }
@@ -2482,10 +2583,9 @@ namespace MapPerfProbe
                 int afterCount = -1;
                 lock (_lock)
                 {
-                    const int MaxQueued = 20000;
-                    int room = Math.Max(0, MaxQueued - _q.Count);
+                    int room = Math.Max(0, MaxQueued - (_qHandlers.Count + _qHubs.Count));
                     enq = Math.Min(room, actions.Count);
-                    for (int i = 0; i < enq; i++) _q.Enqueue(actions[i]);
+                    for (int i = 0; i < enq; i++) _qHandlers.Enqueue(actions[i]);
                     if (enq < actions.Count)
                     {
                         var dropped = actions.Count - enq;
@@ -2493,7 +2593,7 @@ namespace MapPerfProbe
                         var suffix = dropped > shown ? "+" : string.Empty;
                         MapPerfLog.Warn($"[slice] dropped {shown}{suffix} (queue full)");
                     }
-                    afterCount = _q.Count;
+                    afterCount = _qHandlers.Count + _qHubs.Count;
                 }
                 if (afterCount >= QueuePressureThreshold) TryLogQueuePressure_NoLock(afterCount);
                 if (enq > 0)
@@ -2531,36 +2631,74 @@ namespace MapPerfProbe
                         return false;
                     }
 
-                    if (!EnqueueOnce(key, 50.0))
+                    if (!EnqueueOnce(key, 200.0))
                         return true;
 
-                    int afterCount;
-                    lock (_lock)
+                    var pendingKey = HubKey(mi);
+                    var fastOrPaused = SubModule.IsFastOrPaused();
+
+                    void InvokeFallback()
                     {
-                        _q.Enqueue(() =>
+                        var start = Stopwatch.GetTimestamp();
+                        EnterBypass(original);
+                        try { mi.Invoke(null, null); }
+                        catch (Exception ex) { MapPerfLog.Error($"slice hub {mi.DeclaringType?.FullName}.{mi.Name} failed", ex); }
+                        finally
                         {
-                            EnterBypass(original);
-                            try { mi.Invoke(null, null); }
-                            finally { ExitBypass(original); }
-                        });
-                        afterCount = _q.Count;
+                            ExitBypass(original);
+                            var elapsed = Stopwatch.GetTimestamp() - start;
+                            var elapsedMs = elapsed * SubModule.TicksToMs;
+                            var stateFastOrPaused = SubModule.IsFastOrPaused();
+                            lock (_pendingLock)
+                            {
+                                _pending.Remove(pendingKey);
+                                if (!stateFastOrPaused && elapsedMs > 8.0)
+                                {
+                                    TrimDeferred_NoLock();
+                                    _deferred[pendingKey] = InvokeFallback;
+                                }
+                                else
+                                {
+                                    _deferred.Remove(pendingKey);
+                                }
+                            }
+                        }
                     }
-                    if (afterCount >= QueuePressureThreshold) TryLogQueuePressure_NoLock(afterCount);
-                    MapPerfLog.Info($"[slice] deferred hub {hubType.FullName}.{methodName} (fallback)");
+                    lock (_pendingLock)
+                    {
+                        if (_pending.Contains(pendingKey)) return true;
+                        if (!fastOrPaused) { TrimDeferred_NoLock(); _deferred[pendingKey] = InvokeFallback; return true; }
+                        _pending.Add(pendingKey);
+                        int afterCount;
+                        // Lock order invariant: hold _pendingLock before taking _lock.
+                        lock (_lock)
+                        {
+                            if (_qHandlers.Count + _qHubs.Count >= MaxQueued)
+                            {
+                                _pending.Remove(pendingKey);
+                                TrimDeferred_NoLock();
+                                _deferred[pendingKey] = InvokeFallback; // back off
+                                return true;
+                            }
+                            _qHubs.Enqueue(InvokeFallback);
+                            afterCount = _qHandlers.Count + _qHubs.Count;
+                        }
+                        if (afterCount >= QueuePressureThreshold) TryLogQueuePressure_NoLock(afterCount);
+                    }
+                    MapPerfLog.Info($"[slice] queued hub {hubType.FullName}.{methodName} (fallback)");
                     return true;
                 }
 
-                if (!EnqueueOnce(key, 50.0))
+                if (!EnqueueOnce(key, 200.0))
                     return true;
 
                 int enq = 0;
                 int after;
                 lock (_lock)
                 {
-                    const int MaxQueued = 20000;
-                    int room = Math.Max(0, MaxQueued - _q.Count);
+                    int room = Math.Max(0, MaxQueued - (_qHandlers.Count + _qHubs.Count));
                     enq = Math.Min(room, actions.Count);
-                    for (int i = 0; i < enq; i++) _q.Enqueue(actions[i]);
+                    for (int i = 0; i < enq; i++) _qHandlers.Enqueue(actions[i]);
                     if (enq < actions.Count)
                     {
                         var dropped = actions.Count - enq;
@@ -2568,7 +2706,7 @@ namespace MapPerfProbe
                         var suffix = dropped > shown ? "+" : string.Empty;
                         MapPerfLog.Warn($"[slice] dropped {shown}{suffix} (queue full)");
                     }
-                    after = _q.Count;
+                    after = _qHandlers.Count + _qHubs.Count;
                 }
                 if (after >= QueuePressureThreshold) TryLogQueuePressure_NoLock(after);
                 if (enq > 0)
@@ -2586,50 +2724,68 @@ namespace MapPerfProbe
             }
         }
 
-        public static void Pump(double msBudget = 2.0, int hardCap = 256)
+        // Drain handlers always; drain hub fallbacks only when paused/fast-time.
+        public static void Pump(double msBudget)
         {
             if (msBudget <= 0.0) return;
+
+            // If we’ve just become paused/fast-time, materialize deferred hubs now.
+            if (SubModule.IsFastOrPaused())
+            {
+                lock (_pendingLock)
+                {
+                    // Lock order invariant: acquire _pendingLock before _lock.
+                    lock (_lock)
+                    {
+                        MoveDeferredToHubQueue_NoLocks();
+                    }
+                }
+            }
+            // Re-check after waking deferred
             lock (_lock)
             {
-                if (_q.Count == 0) return;
+                if (_qHandlers.Count == 0 && _qHubs.Count == 0) return;
             }
-            long start = Stopwatch.GetTimestamp();
-            long ticksBudget = (long)(msBudget * (Stopwatch.Frequency / 1000.0));
-            int done = 0;
-            // allow larger batch while paused to drain backlog safely
-            if (msBudget >= 3.0 && hardCap < 1024) hardCap = 1024;
-            if (msBudget >= 6.0 && hardCap < 2048) hardCap = 2048;
-
-            while (done < hardCap)
+            double budget = msBudget;
+            int pumped = 0;
+            while (true)
             {
+                bool allowHubs = SubModule.IsFastOrPaused();
                 Action a = null;
                 lock (_lock)
                 {
-                    if (_q.Count == 0) break;
-                    a = _q.Dequeue();
+                    // Prefer handlers, but every 8th action pick a hub if available.
+                    if (_qHandlers.Count > 0 &&
+                        (!allowHubs || _qHubs.Count == 0 || (pumped % 8) != 7))
+                    {
+                        a = _qHandlers.Dequeue();
+                    }
+                    else if (allowHubs && _qHubs.Count > 0)
+                    {
+                        a = _qHubs.Dequeue();
+                    }
+                    else break;
                 }
+                var before = Stopwatch.GetTimestamp();
                 try { a(); }
-                catch (Exception ex) { MapPerfLog.Error("[slice] handler error", ex); }
-                done++;
-                if ((Stopwatch.GetTimestamp() - start) > ticksBudget) break;
+                catch (Exception ex) { MapPerfLog.Error("[slice] pumped action failed", ex); }
+                var tookMs = (Stopwatch.GetTimestamp() - before) * SubModule.TicksToMs;
+                pumped++;
+                budget -= Math.Max(0.0, tookMs);
+                // Always respect budget; add extra per-action guard only while RUN
+                if (budget <= 0.0) break;
+                if (!allowHubs && tookMs > 2.0) break;
             }
-
-            int remaining;
+            int rem;
             lock (_lock)
+                rem = _qHandlers.Count + _qHubs.Count;
+            var now = Stopwatch.GetTimestamp();
+            // Only log occasionally and when it matters (drained or big batch)
+            if (pumped > 0 && (rem == 0 || pumped >= 64) &&
+                now >= Volatile.Read(ref _nextPumpLogTs))
             {
-                remaining = _q.Count;
-            }
-
-            if (done > 0 && (remaining == 0 || done >= 64))
-            {
-                var now = Stopwatch.GetTimestamp();
-                var nextAllowed = Volatile.Read(ref _nextPumpLogTs);
-                if (now >= nextAllowed)
-                {
-                    MapPerfLog.Info($"[slice] pumped {done} (rem {remaining})");
-                    Volatile.Write(ref _nextPumpLogTs,
-                        now + (long)(Stopwatch.Frequency * PumpLogCooldownSeconds));
-                }
+                MapPerfLog.Info($"[slice] pumped {pumped} (rem {rem})");
+                Volatile.Write(ref _nextPumpLogTs, now + (long)(Stopwatch.Frequency * PumpLogCooldownSeconds));
             }
         }
 
