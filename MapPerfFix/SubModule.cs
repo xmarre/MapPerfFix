@@ -549,8 +549,14 @@ namespace MapPerfProbe
         {
             if (candidate == null || methodName == null) return false;
             if (string.Equals(candidate, methodName, StringComparison.OrdinalIgnoreCase)) return true;
+
             var alias = GetMethodAlias(methodName);
-            return alias != null && string.Equals(candidate, alias, StringComparison.OrdinalIgnoreCase);
+            if (alias != null && string.Equals(candidate, alias, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            var candidateAlias = GetMethodAlias(candidate);
+            return candidateAlias != null
+                   && string.Equals(candidateAlias, methodName, StringComparison.OrdinalIgnoreCase);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -559,7 +565,17 @@ namespace MapPerfProbe
             if (type == null || methodName == null) return null;
 
             MethodInfo Lookup(string name)
-                => name == null ? null : type.GetMethod(name, flags, null, Type.EmptyTypes, null);
+            {
+                if (name == null) return null;
+
+                for (var search = type; search != null && search != typeof(object); search = search.BaseType)
+                {
+                    var found = search.GetMethod(name, flags, null, Type.EmptyTypes, null);
+                    if (found != null) return found;
+                }
+
+                return null;
+            }
 
             var mi = Lookup(methodName);
             if (mi != null) return mi;
