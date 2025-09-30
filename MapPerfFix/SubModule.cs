@@ -22,8 +22,12 @@ namespace MapPerfProbe
         private static bool _didPatch;
         private static readonly ConcurrentDictionary<MethodBase, double> _allocCd =
             new ConcurrentDictionary<MethodBase, double>();
+        private static readonly ConcurrentDictionary<MethodBase, AllocWarnBudget> _allocBudget =
+            new ConcurrentDictionary<MethodBase, AllocWarnBudget>();
         private const double AllocLogCooldown = 2.0;
         private const double AllocLogTtl = 60.0;
+        private const double AllocWarnWindowSeconds = 5.0;
+        private const int AllocWarnBurstLimit = 3;
         private static double _nextAllocPrune;
         private static int _sample;
 
@@ -83,8 +87,8 @@ namespace MapPerfProbe
             new ConcurrentDictionary<MethodBase, long>();
         private static long _mapHotLastPruneTs;
         private static Func<long> _getAllocForThread;
-        private const double MapHotDurationMsThreshold = 2.0;
-        private const long MapHotAllocThresholdBytes = 256_000;
+        private const double MapHotDurationMsThreshold = 1.0;
+        private const long MapHotAllocThresholdBytes = 128_000;
         private const double MapHotCooldownSeconds = 0.05;
         private const int MapHotCooldownPruneLimit = 2_000;
         private const double MapHotCooldownPruneWindowMultiplier = 10.0;
@@ -129,6 +133,12 @@ namespace MapPerfProbe
         private static readonly double TicksToMs = 1000.0 / Stopwatch.Frequency;
         private const double BytesPerKiB = 1024.0;
 
+        private struct AllocWarnBudget
+        {
+            public double NextReset;
+            public int Count;
+        }
+
         private static bool IsPeriodic(MethodBase m)
         {
             var n = m.Name;
@@ -156,8 +166,8 @@ namespace MapPerfProbe
         // --- MapScreen throttling (real perf tweak) ---
         private static GCLatencyMode _prevGcMode = GCSettings.LatencyMode;
         private static int _mapScreenSkipFrames;
-        private const double MapScreenBackoffMs1 = 12.0; // if a frame takes ≥12ms, skip next 1 frame
-        private const double MapScreenBackoffMs2 = 18.0; // if a frame takes ≥18ms, skip next 2 frames
+        private const double MapScreenBackoffMs1 = 10.0; // if a frame takes ≥10ms, skip next 1 frame
+        private const double MapScreenBackoffMs2 = 14.0; // if a frame takes ≥14ms, skip next 2 frames
         private const int MapScreenSkipFrames1 = 1;
         private const int MapScreenSkipFrames2 = 2;
 
@@ -197,6 +207,16 @@ namespace MapPerfProbe
                             harmony,
                             "TaleWorlds.CampaignSystem.CampaignEventDispatcher",
                             new[] { "DailyTick", "HourlyTick" },
+                            prefix: typeof(SubModule).GetMethod(nameof(OnDailyTick_Prefix), HookBindingFlags),
+                            prefix2: typeof(SubModule).GetMethod(nameof(OnHourlyTick_Prefix), HookBindingFlags));
+                    });
+                SafePatch("Slice CampaignEvents Daily/Hourly",
+                    () =>
+                    {
+                        TryPatchType(
+                            harmony,
+                            "TaleWorlds.CampaignSystem.CampaignEvents",
+                            new[] { "DailyTick", "HourlyTick", "OnDailyTick", "OnHourlyTick" },
                             prefix: typeof(SubModule).GetMethod(nameof(OnDailyTick_Prefix), HookBindingFlags),
                             prefix2: typeof(SubModule).GetMethod(nameof(OnHourlyTick_Prefix), HookBindingFlags));
                     });
@@ -357,9 +377,12 @@ namespace MapPerfProbe
                 if (onMap) FlushSummary(force: false);
             }
 
-            // Use leftover time at the end of the frame when actively on the campaign map
-            if (onMap && !paused)
-                PeriodicSlicer.Pump(msBudget: 2.0);
+            // Drain slices even while paused to avoid backlog cliffs
+            if (onMap)
+            {
+                var budget = paused ? 3.0 : (IsFastTime() ? 6.0 : 2.0);
+                PeriodicSlicer.Pump(msBudget: budget);
+            }
         }
 
         [DllImport("kernel32.dll")]
@@ -442,7 +465,7 @@ namespace MapPerfProbe
             MethodInfo[] methods;
             try
             {
-                methods = t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                methods = t.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
             }
             catch
             {
@@ -460,7 +483,11 @@ namespace MapPerfProbe
                 var ps = m.GetParameters();
                 if (ps.Length > 2) continue;
                 bool byref = false;
-                for (int i = 0; i < ps.Length; i++) if (ps[i].ParameterType.IsByRef) { byref = true; break; }
+                for (int i = 0; i < ps.Length; i++)
+                {
+                    var p = ps[i];
+                    if (p.IsOut || p.ParameterType.IsByRef) { byref = true; break; }
+                }
                 if (byref) continue;
 
                 try
@@ -489,8 +516,9 @@ namespace MapPerfProbe
             var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
             if (hmCtor == null || patchMi == null) return;
 
-            foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic))
             {
+                if (m.IsSpecialName) continue;
                 if (!methodNames.Any(n => MatchesMethodAlias(m.Name, n)) || m.ReturnType != typeof(void)) continue;
                 var pre =
                     MatchesMethodAlias(m.Name, "OnDailyTick")
@@ -499,6 +527,15 @@ namespace MapPerfProbe
                             ? prefix2
                             : null;
                 if (pre == null) continue;
+                var ps = m.GetParameters();
+                if (ps.Length != 0) continue;
+                bool byref = false;
+                for (int i = 0; i < ps.Length; i++)
+                {
+                    var p = ps[i];
+                    if (p.IsOut || p.ParameterType.IsByRef) { byref = true; break; }
+                }
+                if (byref) continue;
                 var preHM = hmCtor.Invoke(new object[] { pre });
                 try
                 {
@@ -527,11 +564,18 @@ namespace MapPerfProbe
             }
         }
 
-        public static bool OnDailyTick_Prefix(object __instance)
-            => !PeriodicSlicer.RedirectDaily(__instance);
+        // Handle both instance hubs (dispatcher) and static hubs (CampaignEvents) with reentry guard
+        public static bool OnDailyTick_Prefix(object __instance, MethodBase __originalMethod)
+        {
+            if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
+            return !PeriodicSlicer.RedirectAny(__instance, __originalMethod, "OnDailyTick");
+        }
 
-        public static bool OnHourlyTick_Prefix(object __instance)
-            => !PeriodicSlicer.RedirectHourly(__instance);
+        public static bool OnHourlyTick_Prefix(object __instance, MethodBase __originalMethod)
+        {
+            if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
+            return !PeriodicSlicer.RedirectAny(__instance, __originalMethod, "OnHourlyTick");
+        }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static string GetMethodAlias(string methodName)
@@ -1404,9 +1448,10 @@ namespace MapPerfProbe
                 var alloc = GC.GetTotalMemory(false) - __state.mem;
                 if (alloc > 0)
                     RecordAllocBucket(__originalMethod, alloc, dt);
-                if (alloc > 20_000_000)
+                if (alloc > 8_000_000)
                 {
-                    if (!_allocCd.TryGetValue(__originalMethod, out var next) || tNow >= next)
+                    if (TryConsumeAllocBudget(__originalMethod, tNow)
+                        && (!_allocCd.TryGetValue(__originalMethod, out var next) || tNow >= next))
                     {
                         _allocCd[__originalMethod] = tNow + AllocLogCooldown;
                         var owner = __originalMethod.DeclaringType?.FullName ?? "<global>";
@@ -1556,6 +1601,52 @@ namespace MapPerfProbe
             return __exception; // don't swallow
         }
 
+        private static bool TryConsumeAllocBudget(MethodBase method, double now)
+        {
+            if (method == null) return false;
+            var allowed = false;
+            _allocBudget.AddOrUpdate(
+                method,
+                _ =>
+                {
+                    allowed = true;
+                    return new AllocWarnBudget { NextReset = now + AllocWarnWindowSeconds, Count = 1 };
+                },
+                (_, existing) =>
+                {
+                    if (now >= existing.NextReset)
+                    {
+                        allowed = true;
+                        existing.NextReset = now + AllocWarnWindowSeconds;
+                        existing.Count = 1;
+                    }
+                    else if (existing.Count < AllocWarnBurstLimit)
+                    {
+                        allowed = true;
+                        existing.Count++;
+                    }
+                    else
+                    {
+                        existing.Count++;
+                    }
+
+                    return existing;
+                });
+
+            if (!allowed) return false;
+
+            if (_allocBudget.Count > 1024)
+            {
+                foreach (var kv in _allocBudget)
+                {
+                    if (now >= kv.Value.NextReset + AllocLogTtl)
+                        _allocBudget.TryRemove(kv.Key, out _);
+                }
+            }
+
+            return true;
+        }
+
         private static void PruneAllocCooldowns(double now)
         {
             double scheduled;
@@ -1571,6 +1662,12 @@ namespace MapPerfProbe
                 var lastLogTime = kv.Value - AllocLogCooldown;
                 if (now - lastLogTime > AllocLogTtl)
                     _allocCd.TryRemove(kv.Key, out _);
+            }
+
+            foreach (var kv in _allocBudget)
+            {
+                if (now >= kv.Value.NextReset + AllocLogTtl)
+                    _allocBudget.TryRemove(kv.Key, out _);
             }
         }
 
@@ -2083,14 +2180,29 @@ namespace MapPerfProbe
     {
         private static readonly Queue<Action> _q = new Queue<Action>(4096);
         private static readonly object _lock = new object();
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<MethodBase, int> _bypass
+            = new System.Collections.Concurrent.ConcurrentDictionary<MethodBase, int>();
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _recentHubs
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, long>();
         private static long _nextPumpLogTs;
+        private static long _nextQueuePressureLogTs;
         private const double PumpLogCooldownSeconds = 0.5;
+        private const double QueuePressureCooldownSeconds = 0.5;
+        private const int QueuePressureThreshold = 15_000;
 
         public static bool RedirectDaily(object dispatcher)
             => Redirect(dispatcher, "OnDailyTick");
 
         public static bool RedirectHourly(object dispatcher)
             => Redirect(dispatcher, "OnHourlyTick");
+
+        public static bool RedirectAny(object instance, MethodBase original, string methodName)
+        {
+            if (instance != null)
+                return Redirect(instance, methodName);
+            var t = original?.DeclaringType;
+            return t != null && RedirectStatic(t, original, methodName);
+        }
 
         private static bool Redirect(object dispatcher, string methodName)
         {
@@ -2101,6 +2213,7 @@ namespace MapPerfProbe
                 if (actions.Count == 0) return false;
 
                 int enq = 0;
+                int afterCount = -1;
                 lock (_lock)
                 {
                     const int MaxQueued = 20000;
@@ -2114,7 +2227,9 @@ namespace MapPerfProbe
                         var suffix = dropped > shown ? "+" : string.Empty;
                         MapPerfLog.Warn($"[slice] dropped {shown}{suffix} (queue full)");
                     }
+                    afterCount = _q.Count;
                 }
+                if (afterCount >= QueuePressureThreshold) TryLogQueuePressure_NoLock(afterCount);
                 if (enq > 0)
                 {
                     var shown = Math.Min(enq, 5000);
@@ -2130,6 +2245,80 @@ namespace MapPerfProbe
             }
         }
 
+        private static bool RedirectStatic(Type hubType, MethodBase original, string methodName)
+        {
+            try
+            {
+                if (hubType == null) return false;
+                var actions = DiscoverSubscriberActions(hubType, methodName);
+                var key = $"{hubType.FullName}:{methodName}";
+                if (actions.Count == 0)
+                {
+                    if (original is MethodInfo mi)
+                    {
+                        if (mi.IsAbstract || mi.ContainsGenericParameters || mi.GetParameters().Length != 0)
+                            return false;
+                    }
+                    else
+                    {
+                        return false;
+                    }
+
+                    if (!EnqueueOnce(key, 50.0))
+                        return true;
+
+                    int afterCount;
+                    lock (_lock)
+                    {
+                        _q.Enqueue(() =>
+                        {
+                            EnterBypass(original);
+                            try { mi.Invoke(null, null); }
+                            finally { ExitBypass(original); }
+                        });
+                        afterCount = _q.Count;
+                    }
+                    if (afterCount >= QueuePressureThreshold) TryLogQueuePressure_NoLock(afterCount);
+                    MapPerfLog.Info($"[slice] deferred hub {hubType.FullName}.{methodName} (fallback)");
+                    return true;
+                }
+
+                if (!EnqueueOnce(key, 50.0))
+                    return true;
+
+                int enq = 0;
+                int after;
+                lock (_lock)
+                {
+                    const int MaxQueued = 20000;
+                    int room = Math.Max(0, MaxQueued - _q.Count);
+                    enq = Math.Min(room, actions.Count);
+                    for (int i = 0; i < enq; i++) _q.Enqueue(actions[i]);
+                    if (enq < actions.Count)
+                    {
+                        var dropped = actions.Count - enq;
+                        var shown = Math.Min(dropped, 5000);
+                        var suffix = dropped > shown ? "+" : string.Empty;
+                        MapPerfLog.Warn($"[slice] dropped {shown}{suffix} (queue full)");
+                    }
+                    after = _q.Count;
+                }
+                if (after >= QueuePressureThreshold) TryLogQueuePressure_NoLock(after);
+                if (enq > 0)
+                {
+                    var shown = Math.Min(enq, 5000);
+                    var suffix = enq > shown ? "+" : string.Empty;
+                    MapPerfLog.Info($"[slice] queued {shown}{suffix} {methodName} handlers (static hub)");
+                }
+                return enq > 0;
+            }
+            catch (Exception ex)
+            {
+                MapPerfLog.Error($"slice redirect static {methodName} failed", ex);
+                return false;
+            }
+        }
+
         public static void Pump(double msBudget = 2.0, int hardCap = 256)
         {
             if (msBudget <= 0.0) return;
@@ -2140,6 +2329,9 @@ namespace MapPerfProbe
             long start = Stopwatch.GetTimestamp();
             long ticksBudget = (long)(msBudget * (Stopwatch.Frequency / 1000.0));
             int done = 0;
+            // allow larger batch while paused to drain backlog safely
+            if (msBudget >= 3.0 && hardCap < 1024) hardCap = 1024;
+            if (msBudget >= 6.0 && hardCap < 2048) hardCap = 2048;
 
             while (done < hardCap)
             {
@@ -2174,6 +2366,50 @@ namespace MapPerfProbe
             }
         }
 
+        private static bool EnqueueOnce(string key, double windowMs)
+        {
+            if (string.IsNullOrEmpty(key) || windowMs <= 0.0) return true;
+            long now = Stopwatch.GetTimestamp();
+            long windowTicks = (long)(windowMs * (Stopwatch.Frequency / 1000.0));
+
+            while (true)
+            {
+                if (_recentHubs.TryGetValue(key, out var prev))
+                {
+                    if (now - prev <= windowTicks)
+                        return false;
+                    if (_recentHubs.TryUpdate(key, now, prev))
+                        break;
+                    continue;
+                }
+
+                if (_recentHubs.TryAdd(key, now))
+                    break;
+            }
+
+            if (_recentHubs.Count > 2048)
+            {
+                foreach (var kv in _recentHubs)
+                {
+                    if (now - kv.Value > windowTicks * 4)
+                        _recentHubs.TryRemove(kv.Key, kv.Value);
+                }
+            }
+
+            return true;
+        }
+
+        private static void TryLogQueuePressure_NoLock(int count)
+        {
+            if (count < QueuePressureThreshold) return;
+            var now = Stopwatch.GetTimestamp();
+            var next = Volatile.Read(ref _nextQueuePressureLogTs);
+            if (now < next) return;
+            MapPerfLog.Info($"[slice] queue pressure {count}");
+            Volatile.Write(ref _nextQueuePressureLogTs,
+                now + (long)(Stopwatch.Frequency * QueuePressureCooldownSeconds));
+        }
+
         private static List<Action> DiscoverSubscriberActions(object dispatcher, string methodName)
         {
             var ret = new List<Action>(256);
@@ -2190,19 +2426,16 @@ namespace MapPerfProbe
                 {
                     foreach (var one in del.GetInvocationList())
                     {
-                        if (NameIsTarget(one.Method.Name) &&
-                            one.Method.GetParameters().Length == 0)
+                        if (one.Method.GetParameters().Length != 0) continue;
+                        try
                         {
-                            try
-                            {
-                                var action = (Action)one.Method.CreateDelegate(typeof(Action), one.Target);
-                                ret.Add(action);
-                            }
-                            catch
-                            {
-                                var o = one;
-                                ret.Add(() => o.DynamicInvoke(Array.Empty<object>()));
-                            }
+                            var action = (Action)one.Method.CreateDelegate(typeof(Action), one.Target);
+                            ret.Add(action);
+                        }
+                        catch
+                        {
+                            var o = one;
+                            ret.Add(() => o.DynamicInvoke(Array.Empty<object>()));
                         }
                     }
                     return;
@@ -2220,7 +2453,13 @@ namespace MapPerfProbe
                     {
                         ret.Add(() => mi.Invoke(target, null));
                     }
+                    return;
                 }
+
+                TryExpand(target, inner =>
+                {
+                    if (!ReferenceEquals(inner, target)) AddIfInvokable(inner);
+                });
             }
 
             bool NameLooksRelevant(string n)
@@ -2253,6 +2492,102 @@ namespace MapPerfProbe
             }
 
             return ret;
+        }
+
+        private static List<Action> DiscoverSubscriberActions(Type hubType, string methodName)
+        {
+            var ret = new List<Action>(256);
+            const BindingFlags F = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+
+            bool NameIsTarget(string n) => SubModule.MatchesMethodAlias(n, methodName);
+
+            void AddIfInvokable(object target)
+            {
+                if (target == null) return;
+                if (target is Delegate del)
+                {
+                    foreach (var one in del.GetInvocationList())
+                    {
+                        try
+                        {
+                            var a = (Action)one;
+                            ret.Add(a);
+                        }
+                        catch
+                        {
+                            var o = one;
+                            ret.Add(() => o.DynamicInvoke(Array.Empty<object>()));
+                        }
+                    }
+                    return;
+                }
+
+                var mi = SubModule.GetZeroParamMethod(target.GetType(), methodName,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (mi != null && !mi.IsAbstract)
+                {
+                    try
+                    {
+                        var action = (Action)mi.CreateDelegate(typeof(Action), target);
+                        ret.Add(action);
+                    }
+                    catch
+                    {
+                        ret.Add(() => mi.Invoke(target, null));
+                    }
+                    return;
+                }
+
+                TryExpand(target, inner =>
+                {
+                    if (!ReferenceEquals(inner, target)) AddIfInvokable(inner);
+                });
+            }
+
+            EventInfo[] events;
+            try { events = hubType.GetEvents(F); }
+            catch { events = Array.Empty<EventInfo>(); }
+
+            foreach (var ev in events)
+            {
+                if (!NameIsTarget(ev.Name)) continue;
+                var fi = hubType.GetField(ev.Name, F)
+                         ?? hubType.GetField($"_{ev.Name}", F)
+                         ?? hubType.GetField($"m_{ev.Name}", F);
+                if (fi != null) TryExpand(fi.GetValue(null), AddIfInvokable);
+            }
+
+            FieldInfo[] fields;
+            try { fields = hubType.GetFields(F); }
+            catch { fields = Array.Empty<FieldInfo>(); }
+
+            foreach (var f in fields)
+            {
+                var ft = f.FieldType;
+                if (NameIsTarget(f.Name)
+                    || ft.Name.IndexOf("Event", StringComparison.OrdinalIgnoreCase) >= 0
+                    || typeof(Delegate).IsAssignableFrom(ft))
+                {
+                    TryExpand(f.GetValue(null), AddIfInvokable);
+                }
+            }
+
+            return ret;
+        }
+
+        public static bool ShouldBypass(MethodBase m)
+            => m != null && _bypass.TryGetValue(m, out var c) && c > 0;
+
+        private static void EnterBypass(MethodBase m)
+        {
+            if (m == null) return;
+            _bypass.AddOrUpdate(m, 1, (_, v) => v + 1);
+        }
+
+        private static void ExitBypass(MethodBase m)
+        {
+            if (m == null) return;
+            _bypass.AddOrUpdate(m, 0, (_, v) => Math.Max(0, v - 1));
         }
 
         private static void TryExpand(object container, Action<object> accept)
