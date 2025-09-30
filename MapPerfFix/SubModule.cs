@@ -6,9 +6,10 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
+using System.Runtime;
 using System.Runtime.InteropServices;
 using System.Threading;
-using System.Runtime;
+using System.Runtime.CompilerServices;
 using System.Text;
 using TaleWorlds.MountAndBlade;
 
@@ -37,6 +38,47 @@ namespace MapPerfProbe
         [ThreadStatic] private static bool _mapScreenFastTimeValid;
         [ThreadStatic] private static bool _mapScreenThrottleActive;
         [ThreadStatic] private static bool _mapHotGate;
+        private static double _frameBudgetMs = 1000.0 / 60.0;
+        private static double _frameBudgetEmaMs;
+        private const double BudgetAlpha = 0.05;
+        private const double BudgetHeadroom = 1.20;
+        private const double BudgetMinMs = 4.0;
+        private const double BudgetMaxMs = 33.5;
+        private static readonly double[] CommonPeriodsMs =
+        {
+            1000.0 / 240.0,
+            1000.0 / 200.0,
+            1000.0 / 180.0,
+            1000.0 / 175.0,
+            1000.0 / 170.0,
+            1000.0 / 165.0,
+            1000.0 / 160.0,
+            1000.0 / 150.0,
+            1000.0 / 144.0,
+            1000.0 / 120.0,
+            1000.0 / 100.0,
+            1000.0 / 90.0,
+            1000.0 / 85.0,
+            1000.0 / 75.0,
+            1000.0 / 72.0,
+            1000.0 / 70.0,
+            1000.0 / 60.0,
+            1000.0 / 50.0,
+            1000.0 / 48.0,
+            1000.0 / 40.0,
+            1000.0 / 30.0
+        };
+        private const double SnapEpsMs = 0.40;
+        private const int OverBudgetStreakCap = 1_000;
+        private const int HotEnableStreak = 2;
+        private const double SpikeRunMs = 50.0;
+        private const double SpikePausedMs = 80.0;
+        private const double FlushOnHugeFrameMs = 200.0;
+        private const long AllocSpikeBytes = 25_000_000;
+        private const long WsSpikeBytes = 75_000_000;
+        private const long ForceFlushAllocBytes = 150_000_000;
+        private const long ForceFlushWsBytes = 250_000_000;
+        private static int _overBudgetStreak;
         private static readonly ConcurrentDictionary<MethodBase, long> MapHotCooldowns =
             new ConcurrentDictionary<MethodBase, long>();
         private static long _mapHotLastPruneTs;
@@ -147,14 +189,14 @@ namespace MapPerfProbe
                 // High-level map/UI hooks (already working)
                 SafePatch("TryPatchType(MapState)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.GameState.MapState", new[] { "OnTick", "OnMapModeTick", "OnFrameTick" }));
                 SafePatch("TryPatchType(MapState2)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.MapState", new[] { "OnTick", "OnMapModeTick", "OnFrameTick" }));
-                SafePatch("TryPatchType(CampaignEventDispatcher)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.CampaignEventDispatcher", new[] { "OnTick", "OnHourlyTick", "OnDailyTick" }));
+                SafePatch("TryPatchType(CampaignEventDispatcher)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.CampaignEventDispatcher", new[] { "OnTick", "DailyTick", "HourlyTick" }));
                 SafePatch("Slice Daily/Hourly",
                     () =>
                     {
                         TryPatchType(
                             harmony,
                             "TaleWorlds.CampaignSystem.CampaignEventDispatcher",
-                            new[] { "OnDailyTick", "OnHourlyTick" },
+                            new[] { "DailyTick", "HourlyTick" },
                             prefix: typeof(SubModule).GetMethod(nameof(OnDailyTick_Prefix), HookBindingFlags),
                             prefix2: typeof(SubModule).GetMethod(nameof(OnHourlyTick_Prefix), HookBindingFlags));
                     });
@@ -195,9 +237,30 @@ namespace MapPerfProbe
             MapPerfLog.Info("=== MapPerfProbe stop ===");
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static double SnapToVsyncIfClose(double ms)
+        {
+            var best = ms;
+            var bestDiff = double.MaxValue;
+            var periods = CommonPeriodsMs;
+            for (int i = 0; i < periods.Length; i++)
+            {
+                var diff = Math.Abs(periods[i] - ms);
+                if (diff < bestDiff)
+                {
+                    bestDiff = diff;
+                    best = periods[i];
+                }
+            }
+
+            return bestDiff <= SnapEpsMs ? best : ms;
+        }
+
         protected override void OnApplicationTick(float dt)
         {
-            var desired = IsPaused() ? GCLatencyMode.Interactive : GCLatencyMode.SustainedLowLatency;
+            var paused = IsPaused();
+            var onMap = IsOnMap();
+            var desired = paused ? GCLatencyMode.Interactive : GCLatencyMode.SustainedLowLatency;
             if (GCSettings.LatencyMode != desired)
             {
                 try { GCSettings.LatencyMode = desired; }
@@ -206,10 +269,47 @@ namespace MapPerfProbe
             var nowTs = Stopwatch.GetTimestamp();
             double frameMs = (nowTs - _lastFrameTS) * TicksToMs;
             _lastFrameTS = nowTs;
-            if (IsOnMap() && frameMs > 50.0 && _frameSpikeCD <= 0.0)
+            if (frameMs <= 0.0) frameMs = dt * 1000.0;
+
+            var overBudget = false;
+            if (onMap && !paused)
             {
-                MapPerfLog.Warn($"FRAME spike {frameMs:F1} ms [{(IsPaused() ? "PAUSED" : "RUN")}]");
-                if (frameMs > 200.0) FlushSummary(true);
+                if (_frameBudgetEmaMs <= 0.0)
+                {
+                    _frameBudgetEmaMs = frameMs;
+                }
+                else
+                {
+                    var candidate = Math.Min(frameMs, _frameBudgetEmaMs * 1.5);
+                    _frameBudgetEmaMs += (candidate - _frameBudgetEmaMs) * BudgetAlpha;
+                }
+
+                var snapped = SnapToVsyncIfClose(_frameBudgetEmaMs);
+                var clamped = snapped;
+                if (clamped < BudgetMinMs) clamped = BudgetMinMs;
+                else if (clamped > BudgetMaxMs) clamped = BudgetMaxMs;
+                _frameBudgetMs = clamped;
+
+                overBudget = frameMs > (_frameBudgetMs * BudgetHeadroom);
+                if (overBudget)
+                {
+                    var v = Interlocked.Increment(ref _overBudgetStreak);
+                    if (v > OverBudgetStreakCap) Interlocked.Exchange(ref _overBudgetStreak, OverBudgetStreakCap);
+                }
+                else
+                {
+                    Interlocked.Exchange(ref _overBudgetStreak, 0);
+                }
+            }
+            else
+            {
+                Interlocked.Exchange(ref _overBudgetStreak, 0);
+            }
+            var spikeLimit = paused ? SpikePausedMs : SpikeRunMs;
+            if (onMap && frameMs > spikeLimit && _frameSpikeCD <= 0.0)
+            {
+                MapPerfLog.Warn($"FRAME spike {frameMs:F1} ms [{(paused ? "PAUSED" : "RUN")}]");
+                if (frameMs > FlushOnHugeFrameMs) FlushSummary(true);
                 _frameSpikeCD = 1.0;
             }
 
@@ -231,19 +331,19 @@ namespace MapPerfProbe
             var wsDelta = ws - _lastWs;
             _lastWs = ws;
 
-            if (IsOnMap() && allocDelta > 25_000_000 && _memSpikeCD <= 0.0)
+            if (onMap && allocDelta > AllocSpikeBytes && _memSpikeCD <= 0.0)
             {
                 MapPerfLog.Warn($"ALLOC spike +{allocDelta / 1_000_000.0:F1} MB");
                 _memSpikeCD = 5.0;
             }
 
-            if (IsOnMap() && wsDelta > 75_000_000 && _memSpikeCD <= 0.0)
+            if (onMap && wsDelta > WsSpikeBytes && _memSpikeCD <= 0.0)
             {
                 MapPerfLog.Warn($"WS spike +{wsDelta / 1_000_000.0:F1} MB");
                 _memSpikeCD = 5.0;
             }
 
-            if (allocDelta > 150_000_000 || wsDelta > 250_000_000)
+            if (allocDelta > ForceFlushAllocBytes || wsDelta > ForceFlushWsBytes)
                 FlushSummary(true);
 
             _nextFlush -= dt;
@@ -253,12 +353,12 @@ namespace MapPerfProbe
                 _memSpikeCD = Math.Max(0.0, _memSpikeCD - dt);
             if (_nextFlush <= 0.0)
             {
-                _nextFlush = 2.0;
-                if (IsOnMap()) FlushSummary(force: false);
+                _nextFlush = paused ? 5.0 : 2.0;
+                if (onMap) FlushSummary(force: false);
             }
 
             // Use leftover time at the end of the frame when actively on the campaign map
-            if (IsOnMap() && !IsPaused())
+            if (onMap && !paused)
                 PeriodicSlicer.Pump(msBudget: 2.0);
         }
 
@@ -351,7 +451,8 @@ namespace MapPerfProbe
 
             foreach (var m in methods)
             {
-                if (!NameIn(methodNames, m.Name)) continue;
+                if (m.IsSpecialName) continue;
+                if (!methodNames.Any(n => MatchesMethodAlias(m.Name, n))) continue;
                 if (m.ReturnType != typeof(void)) continue;
                 if (m.IsAbstract || m.ContainsGenericParameters || m.DeclaringType?.IsGenericTypeDefinition == true) continue;
                 var declName = m.DeclaringType?.Name;
@@ -390,12 +491,13 @@ namespace MapPerfProbe
 
             foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
             {
-                if (!NameIn(methodNames, m.Name) || m.ReturnType != typeof(void)) continue;
-                var pre = string.Equals(m.Name, "OnDailyTick", StringComparison.OrdinalIgnoreCase)
-                    ? prefix
-                    : string.Equals(m.Name, "OnHourlyTick", StringComparison.OrdinalIgnoreCase)
-                        ? prefix2
-                        : null;
+                if (!methodNames.Any(n => MatchesMethodAlias(m.Name, n)) || m.ReturnType != typeof(void)) continue;
+                var pre =
+                    MatchesMethodAlias(m.Name, "OnDailyTick")
+                        ? prefix
+                        : MatchesMethodAlias(m.Name, "OnHourlyTick")
+                            ? prefix2
+                            : null;
                 if (pre == null) continue;
                 var preHM = hmCtor.Invoke(new object[] { pre });
                 try
@@ -431,14 +533,39 @@ namespace MapPerfProbe
         public static bool OnHourlyTick_Prefix(object __instance)
             => !PeriodicSlicer.RedirectHourly(__instance);
 
-        private static bool NameIn(string[] names, string s)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static string GetMethodAlias(string methodName)
         {
-            if (s == null) return false;
-            for (int i = 0; i < names.Length; i++)
-            {
-                if (string.Equals(names[i], s, StringComparison.OrdinalIgnoreCase)) return true;
-            }
-            return false;
+            if (methodName == null) return null;
+            if (string.Equals(methodName, "OnDailyTick", StringComparison.OrdinalIgnoreCase)) return "DailyTick";
+            if (string.Equals(methodName, "DailyTick", StringComparison.OrdinalIgnoreCase)) return "OnDailyTick";
+            if (string.Equals(methodName, "OnHourlyTick", StringComparison.OrdinalIgnoreCase)) return "HourlyTick";
+            if (string.Equals(methodName, "HourlyTick", StringComparison.OrdinalIgnoreCase)) return "OnHourlyTick";
+            return null;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool MatchesMethodAlias(string candidate, string methodName)
+        {
+            if (candidate == null || methodName == null) return false;
+            if (string.Equals(candidate, methodName, StringComparison.OrdinalIgnoreCase)) return true;
+            var alias = GetMethodAlias(methodName);
+            return alias != null && string.Equals(candidate, alias, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static MethodInfo GetZeroParamMethod(Type type, string methodName, BindingFlags flags)
+        {
+            if (type == null || methodName == null) return null;
+
+            MethodInfo Lookup(string name)
+                => name == null ? null : type.GetMethod(name, flags, null, Type.EmptyTypes, null);
+
+            var mi = Lookup(methodName);
+            if (mi != null) return mi;
+
+            var alias = GetMethodAlias(methodName);
+            return alias != null ? Lookup(alias) : null;
         }
 
         // --- Targeted perf tweak: throttle MapScreen.OnFrameTick under load ---
@@ -508,30 +635,35 @@ namespace MapPerfProbe
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool ShouldEnableMapHot(bool fastTime)
+        {
+            if (fastTime) return true;
+            return Volatile.Read(ref _overBudgetStreak) >= HotEnableStreak;
+        }
+
         // bool-prefix: return false to skip original map frame hooks when throttling
         public static bool MapScreenOnFrameTickPrefix(object __instance, MethodBase __originalMethod)
         {
             var methodName = __originalMethod?.Name;
             if (methodName == null) return true;
 
-            var fastTime = false;
-
             if (string.Equals(methodName, "OnFrameTick", StringComparison.OrdinalIgnoreCase))
             {
-                _mapHotGate = true;
+                var paused = IsPaused();
                 _mapScreenFastTimeValid = false;
                 _mapScreenThrottleActive = false;
-                if (__instance == null || IsPaused())
+                _mapHotGate = false;
+                if (__instance == null || paused)
                 {
-                    _mapHotGate = false; // ensure no hotspot logging while paused/null
                     _skipMapOnFrameTick = false;
                     return true;
                 }
 
-                fastTime = IsFastTime();
+                var fastTime = IsFastTime();
+                _mapHotGate = ShouldEnableMapHot(fastTime);
                 _mapScreenFastTime = fastTime;
                 _mapScreenFastTimeValid = true;
-                _mapHotGate = fastTime; // only log hotspots while fast-time is active
                 if (!fastTime)
                 {
                     _skipMapOnFrameTick = false;
@@ -552,7 +684,7 @@ namespace MapPerfProbe
                 return true;
             }
 
-            if (methodName == null || !MapScreenFrameHooks.Contains(methodName))
+            if (!MapScreenFrameHooks.Contains(methodName))
                 return true;
 
             var hadFastTime = _mapScreenFastTimeValid;
@@ -566,13 +698,13 @@ namespace MapPerfProbe
                 return true;
             }
 
-            fastTime = hadFastTime ? cachedFastTime : IsFastTime();
+            var fastTime = hadFastTime ? cachedFastTime : IsFastTime();
             if (!fastTime)
             {
                 _mapScreenThrottleActive = false;
                 _skipMapOnFrameTick = false;
                 _mapScreenSkipFrames = 0;
-                _mapHotGate = false;
+                _mapHotGate = ShouldEnableMapHot(false);
                 return true;
             }
 
@@ -584,7 +716,7 @@ namespace MapPerfProbe
                 return false;
             }
 
-            _mapHotGate = true;
+            _mapHotGate = ShouldEnableMapHot(true);
             return true;
         }
 
@@ -628,10 +760,16 @@ namespace MapPerfProbe
             return GC.GetTotalMemory(false);
         }
 
-        public struct MapHotState
+        public readonly struct MapHotState
         {
-            public long t0;
-            public long a0;
+            public MapHotState(long t0, long a0)
+            {
+                this.t0 = t0;
+                this.a0 = a0;
+            }
+
+            public long t0 { get; }
+            public long a0 { get; }
         }
 
         public static void MapHotPrefix(out MapHotState __state)
@@ -642,7 +780,7 @@ namespace MapPerfProbe
                 return;
             }
 
-            __state.t0 = Stopwatch.GetTimestamp();
+            var t0 = Stopwatch.GetTimestamp();
             var func = Volatile.Read(ref _getAllocForThread);
             if (func == null)
             {
@@ -650,7 +788,8 @@ namespace MapPerfProbe
                 func = Volatile.Read(ref _getAllocForThread);
             }
 
-            __state.a0 = func != null ? GetThreadAllocs() : 0;
+            var a0 = func != null ? GetThreadAllocs() : 0;
+            __state = new MapHotState(t0, a0);
         }
 
         public static void MapHotPostfix(MethodBase __originalMethod, MapHotState __state)
@@ -795,6 +934,7 @@ namespace MapPerfProbe
                 {
                     if (!seen.Add(m)) continue;
                     if (declaredOnly && m.DeclaringType != t) continue;
+                    if (m.IsSpecialName) continue;
                     var dn = m.DeclaringType?.Name;
                     if (dn != null && dn.IndexOf("d__", StringComparison.Ordinal) >= 0) continue;
                     if (string.Equals(m.Name, "MoveNext", StringComparison.Ordinal)) continue;
@@ -2022,6 +2162,8 @@ namespace MapPerfProbe
             var t = dispatcher.GetType();
             const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
+            bool NameIsTarget(string n) => MatchesMethodAlias(n, methodName);
+
             void AddIfInvokable(object target)
             {
                 if (target == null) return;
@@ -2030,7 +2172,7 @@ namespace MapPerfProbe
                 {
                     foreach (var one in del.GetInvocationList())
                     {
-                        if (string.Equals(one.Method.Name, methodName, StringComparison.OrdinalIgnoreCase) &&
+                        if (NameIsTarget(one.Method.Name) &&
                             one.Method.GetParameters().Length == 0)
                         {
                             try
@@ -2048,7 +2190,7 @@ namespace MapPerfProbe
                     return;
                 }
 
-                var mi = target.GetType().GetMethod(methodName, F, null, Type.EmptyTypes, null);
+                var mi = GetZeroParamMethod(target.GetType(), methodName, F);
                 if (mi != null && !mi.IsAbstract)
                 {
                     try
