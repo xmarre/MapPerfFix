@@ -2392,7 +2392,7 @@ namespace MapPerfProbe
                 foreach (var kv in _recentHubs)
                 {
                     if (now - kv.Value > windowTicks * 4)
-                        _recentHubs.TryRemove(kv.Key, kv.Value);
+                        _recentHubs.TryRemove(kv.Key, out _);
                 }
             }
 
@@ -2415,8 +2415,6 @@ namespace MapPerfProbe
             var ret = new List<Action>(256);
             var t = dispatcher.GetType();
             const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-
-            bool NameIsTarget(string n) => SubModule.MatchesMethodAlias(n, methodName);
 
             void AddIfInvokable(object target)
             {
