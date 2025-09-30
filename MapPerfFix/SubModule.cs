@@ -654,6 +654,7 @@ namespace MapPerfProbe
                 _mapScreenFastTimeValid = false;
                 _mapScreenThrottleActive = false;
                 _mapHotGate = false;
+
                 if (__instance == null || paused)
                 {
                     _skipMapOnFrameTick = false;
@@ -664,6 +665,7 @@ namespace MapPerfProbe
                 _mapHotGate = ShouldEnableMapHot(fastTime);
                 _mapScreenFastTime = fastTime;
                 _mapScreenFastTimeValid = true;
+
                 if (!fastTime)
                 {
                     _skipMapOnFrameTick = false;
@@ -684,12 +686,12 @@ namespace MapPerfProbe
                 return true;
             }
 
-            if (!MapScreenFrameHooks.Contains(methodName))
-                return true;
+            if (!MapScreenFrameHooks.Contains(methodName)) return true;
 
             var hadFastTime = _mapScreenFastTimeValid;
             var cachedFastTime = _mapScreenFastTime;
             _mapScreenFastTimeValid = false;
+
             if (__instance == null || IsPaused())
             {
                 _mapScreenThrottleActive = false;
@@ -698,8 +700,8 @@ namespace MapPerfProbe
                 return true;
             }
 
-            var fastTime = hadFastTime ? cachedFastTime : IsFastTime();
-            if (!fastTime)
+            bool fastTime2 = hadFastTime ? cachedFastTime : IsFastTime();
+            if (!fastTime2)
             {
                 _mapScreenThrottleActive = false;
                 _skipMapOnFrameTick = false;
