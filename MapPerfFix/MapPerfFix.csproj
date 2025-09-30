@@ -53,6 +53,7 @@
     <Content Include="SubModule.xml" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="AGENTS.md" />
     <None Include="packages.config" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
