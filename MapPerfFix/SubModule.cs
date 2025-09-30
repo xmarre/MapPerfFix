@@ -534,7 +534,7 @@ namespace MapPerfProbe
             => !PeriodicSlicer.RedirectHourly(__instance);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static string GetMethodAlias(string methodName)
+        internal static string GetMethodAlias(string methodName)
         {
             if (methodName == null) return null;
             if (string.Equals(methodName, "OnDailyTick", StringComparison.OrdinalIgnoreCase)) return "DailyTick";
@@ -545,7 +545,7 @@ namespace MapPerfProbe
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static bool MatchesMethodAlias(string candidate, string methodName)
+        internal static bool MatchesMethodAlias(string candidate, string methodName)
         {
             if (candidate == null || methodName == null) return false;
             if (string.Equals(candidate, methodName, StringComparison.OrdinalIgnoreCase)) return true;
@@ -560,7 +560,7 @@ namespace MapPerfProbe
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static MethodInfo GetZeroParamMethod(Type type, string methodName, BindingFlags flags)
+        internal static MethodInfo GetZeroParamMethod(Type type, string methodName, BindingFlags flags)
         {
             if (type == null || methodName == null) return null;
 
@@ -2180,7 +2180,7 @@ namespace MapPerfProbe
             var t = dispatcher.GetType();
             const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-            bool NameIsTarget(string n) => MatchesMethodAlias(n, methodName);
+            bool NameIsTarget(string n) => SubModule.MatchesMethodAlias(n, methodName);
 
             void AddIfInvokable(object target)
             {
@@ -2208,7 +2208,7 @@ namespace MapPerfProbe
                     return;
                 }
 
-                var mi = GetZeroParamMethod(target.GetType(), methodName, F);
+                var mi = SubModule.GetZeroParamMethod(target.GetType(), methodName, F);
                 if (mi != null && !mi.IsAbstract)
                 {
                     try
