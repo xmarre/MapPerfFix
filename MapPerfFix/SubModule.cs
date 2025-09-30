@@ -29,7 +29,6 @@ namespace MapPerfProbe
         private const double AllocWarnWindowSeconds = 5.0;
         private const int AllocWarnBurstLimit = 3;
         private static double _nextAllocPrune;
-        private static int _sample;
 
         [ThreadStatic] private static int _callDepth;
         [ThreadStatic] private static MethodBase _rootPeriodic;
@@ -93,6 +92,7 @@ namespace MapPerfProbe
         private const int MapHotCooldownPruneLimit = 2_000;
         private const double MapHotCooldownPruneWindowMultiplier = 10.0;
         private const double RootChildBaseCutoffMs = 0.5;
+        private const double RootBurstMinTotalMs = 8.0;
         private const double RootBurstCooldownSeconds = 0.25;
         private static double _nextRootBurstAllowed;
         private static readonly ConcurrentDictionary<MethodBase, double> RootAgg =
@@ -146,12 +146,25 @@ namespace MapPerfProbe
             return n.IndexOf("DailyTick", StringComparison.OrdinalIgnoreCase) >= 0
                    || n.IndexOf("HourlyTick", StringComparison.OrdinalIgnoreCase) >= 0
                    || n.IndexOf("WeeklyTick", StringComparison.OrdinalIgnoreCase) >= 0
+                   || string.Equals(n, "PeriodicQuarterDailyTick", StringComparison.OrdinalIgnoreCase)
                    || string.Equals(n, "TickPeriodicEvents", StringComparison.OrdinalIgnoreCase)
                    || string.Equals(n, "PeriodicDailyTick", StringComparison.OrdinalIgnoreCase)
                    || string.Equals(n, "PeriodicHourlyTick", StringComparison.OrdinalIgnoreCase)
                    || string.Equals(n, "QuarterDailyPartyTick", StringComparison.OrdinalIgnoreCase)
                    || string.Equals(n, "TickPartialHourlyAi", StringComparison.OrdinalIgnoreCase)
                    || string.Equals(n, "AiHourlyTick", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsPerFrameHook(MethodBase m)
+        {
+            var t = m?.DeclaringType?.FullName;
+            if (t == null) return false;
+            if (t.IndexOf("SandBox.View.Map.MapScreen", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (t.IndexOf("TaleWorlds.CampaignSystem.GameState.MapState", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (t.IndexOf("TaleWorlds.GauntletUI.UIContext", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (t.IndexOf("TaleWorlds.GauntletUI.GauntletLayer", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (t.IndexOf("TaleWorlds.Engine.Screens.ScreenBase", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return false;
         }
 
         private static long _lastFrameTS = Stopwatch.GetTimestamp();
@@ -220,6 +233,30 @@ namespace MapPerfProbe
                             prefix: typeof(SubModule).GetMethod(nameof(OnDailyTick_Prefix), HookBindingFlags),
                             prefix2: typeof(SubModule).GetMethod(nameof(OnHourlyTick_Prefix), HookBindingFlags));
                     });
+                SafePatch("Slice Dispatcher periodics (qtr/hourly/ai/weekly)",
+                    () =>
+                    {
+                        TryPatchType(
+                            harmony,
+                            "TaleWorlds.CampaignSystem.CampaignEventDispatcher",
+                            new[] { "QuarterDailyPartyTick", "TickPartialHourlyAi", "AiHourlyTick", "WeeklyTick" },
+                            typeof(SubModule).GetMethod(nameof(PeriodicHub_Prefix), HookBindingFlags));
+                    });
+                SafePatch("Slice CampaignEvents periodics (static hub)",
+                    () =>
+                    {
+                        TryPatchType(
+                            harmony,
+                            "TaleWorlds.CampaignSystem.CampaignEvents",
+                            new[] { "QuarterDailyPartyTick", "TickPartialHourlyAi", "AiHourlyTick", "WeeklyTick" },
+                            typeof(SubModule).GetMethod(nameof(PeriodicHub_Prefix), HookBindingFlags));
+                    });
+                SafePatch("Slice PeriodicEventManager helpers",
+                    () => TryPatchType(
+                        harmony,
+                        "TaleWorlds.CampaignSystem.CampaignPeriodicEventManager",
+                        new[] { "TickPartialHourlyAi", "PeriodicQuarterDailyTick" },
+                        typeof(SubModule).GetMethod(nameof(PeriodicHub_Prefix), HookBindingFlags)));
                 SafePatch("TryPatchType(MapScreen)", () => TryPatchType(harmony, "SandBox.View.Map.MapScreen", new[] { "OnFrameTick", "Tick", "OnTick" }));
                 SafePatch("TryPatchType(UI)", () => TryPatchType(harmony, "TaleWorlds.GauntletUI.UIContext", new[] { "Update", "Tick" }));
                 SafePatch("TryPatchType(Layer)", () => TryPatchType(harmony, "TaleWorlds.GauntletUI.GauntletLayer", new[] { "OnLateUpdate", "Tick" }));
@@ -373,14 +410,16 @@ namespace MapPerfProbe
                 _memSpikeCD = Math.Max(0.0, _memSpikeCD - dt);
             if (_nextFlush <= 0.0)
             {
-                _nextFlush = paused ? 5.0 : 2.0;
-                if (onMap) FlushSummary(force: false);
+                // slower cadence while running; avoid summary flush during live play but fail-safe every ~30s
+                _nextFlush = paused ? 5.0 : 30.0;
+                if (onMap && (paused || allocDelta > 0 || wsDelta > 0))
+                    FlushSummary(force: false);
             }
 
             // Drain slices even while paused to avoid backlog cliffs
             if (onMap)
             {
-                var budget = paused ? 3.0 : (IsFastTime() ? 6.0 : 2.0);
+                var budget = paused ? 3.0 : (IsFastTime() ? 7.0 : 4.0);
                 PeriodicSlicer.Pump(msBudget: budget);
             }
         }
@@ -481,7 +520,7 @@ namespace MapPerfProbe
                 var declName = m.DeclaringType?.Name;
                 if (declName != null && declName.IndexOf("d__", StringComparison.Ordinal) >= 0) continue;
                 var ps = m.GetParameters();
-                if (ps.Length > 2) continue;
+                if (ps.Length > 4) continue;
                 bool byref = false;
                 for (int i = 0; i < ps.Length; i++)
                 {
@@ -504,7 +543,110 @@ namespace MapPerfProbe
 
         private static void TryPatchType(object harmony, string fullName, string[] methodNames, MethodInfo prefix, MethodInfo prefix2)
         {
-            if (prefix == null || prefix2 == null) return;
+            if (prefix == null || prefix2 == null || methodNames == null || methodNames.Length < 2) return;
+            var t = FindType(fullName);
+            if (t == null) return;
+
+            var ht = harmony.GetType();
+            var asm = ht.Assembly;
+            var hmType = asm.GetType("HarmonyLib.HarmonyMethod")
+                        ?? Type.GetType($"HarmonyLib.HarmonyMethod, {asm.FullName}", false);
+            var hmCtor = hmType?.GetConstructor(new[] { typeof(MethodInfo) });
+            var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
+            if (hmCtor == null || patchMi == null) return;
+
+            var pre1 = hmCtor.Invoke(new object[] { prefix });
+            var pre2 = hmCtor.Invoke(new object[] { prefix2 });
+
+            var prefixMap = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            void MapPrefix(string key, object hm)
+            {
+                if (hm == null || string.IsNullOrEmpty(key)) return;
+                prefixMap[key] = hm;
+                var alias = GetMethodAlias(key);
+                if (!string.IsNullOrEmpty(alias)) prefixMap[alias] = hm;
+            }
+
+            MapPrefix(methodNames[0], pre1);
+            MapPrefix(methodNames[1], pre2);
+            for (int i = 2; i < methodNames.Length; i++)
+            {
+                var key = methodNames[i];
+                if (MatchesMethodAlias(key, methodNames[0]))
+                    MapPrefix(key, pre1);
+                else if (MatchesMethodAlias(key, methodNames[1]))
+                    MapPrefix(key, pre2);
+            }
+
+            void Bump(object hm)
+            {
+                try
+                {
+                    var ty = hm?.GetType();
+                    var prProp = ty?.GetProperty("priority");
+                    var prField = ty?.GetField("priority");
+                    var priorityType = prProp?.PropertyType ?? prField?.FieldType;
+                    object highest = 400;
+                    if (priorityType != null)
+                    {
+                        if (priorityType.IsEnum)
+                            highest = Enum.ToObject(priorityType, 400);
+                        else if (priorityType == typeof(int))
+                            highest = 400;
+                    }
+                    try { prProp?.SetValue(hm, highest); } catch { }
+                    try { prField?.SetValue(hm, highest); } catch { }
+                }
+                catch
+                {
+                    // best-effort priority bump
+                }
+            }
+
+            Bump(pre1);
+            Bump(pre2);
+
+            foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (m.IsSpecialName || m.ReturnType != typeof(void) || m.IsAbstract || m.ContainsGenericParameters || m.DeclaringType?.IsGenericTypeDefinition == true)
+                    continue;
+
+                var dn = m.DeclaringType?.Name;
+                if (dn != null && dn.IndexOf("d__", StringComparison.Ordinal) >= 0)
+                    continue;
+
+                var name = m.Name;
+                if (!methodNames.Any(n => MatchesMethodAlias(name, n))) continue;
+
+                var ps = m.GetParameters();
+                if (ps.Length > 4) continue;
+                if (ps.Any(p => p.IsOut || p.ParameterType.IsByRef)) continue;
+
+                object hm = null;
+                if (!prefixMap.TryGetValue(name, out hm))
+                {
+                    if (MatchesMethodAlias(name, methodNames[0]))
+                        hm = pre1;
+                    else if (methodNames.Length > 1 && MatchesMethodAlias(name, methodNames[1]))
+                        hm = pre2;
+                }
+
+                if (hm == null) continue;
+
+                try
+                {
+                    patchMi.Invoke(harmony, new object[] { m, hm, null, null, null });
+                }
+                catch (Exception ex)
+                {
+                    MapPerfLog.Error($"Slice patch fail {t.FullName}.{m.Name}", ex);
+                }
+            }
+        }
+
+        private static void TryPatchType(object harmony, string fullName, string[] methodNames, MethodInfo prefix)
+        {
+            if (prefix == null) return;
             var t = FindType(fullName);
             if (t == null) return;
 
@@ -520,15 +662,11 @@ namespace MapPerfProbe
             {
                 if (m.IsSpecialName) continue;
                 if (!methodNames.Any(n => MatchesMethodAlias(m.Name, n)) || m.ReturnType != typeof(void)) continue;
-                var pre =
-                    MatchesMethodAlias(m.Name, "OnDailyTick")
-                        ? prefix
-                        : MatchesMethodAlias(m.Name, "OnHourlyTick")
-                            ? prefix2
-                            : null;
-                if (pre == null) continue;
+                if (m.IsAbstract || m.ContainsGenericParameters || m.DeclaringType?.IsGenericTypeDefinition == true) continue;
+                var declName = m.DeclaringType?.Name;
+                if (declName != null && declName.IndexOf("d__", StringComparison.Ordinal) >= 0) continue;
                 var ps = m.GetParameters();
-                if (ps.Length != 0) continue;
+                if (ps.Length > 4) continue;
                 bool byref = false;
                 for (int i = 0; i < ps.Length; i++)
                 {
@@ -536,7 +674,8 @@ namespace MapPerfProbe
                     if (p.IsOut || p.ParameterType.IsByRef) { byref = true; break; }
                 }
                 if (byref) continue;
-                var preHM = hmCtor.Invoke(new object[] { pre });
+
+                var preHM = hmCtor.Invoke(new object[] { prefix });
                 try
                 {
                     var hmInstType = preHM?.GetType();
@@ -553,6 +692,7 @@ namespace MapPerfProbe
                 {
                     // best-effort priority bump
                 }
+
                 try
                 {
                     patchMi.Invoke(harmony, new object[] { m, preHM, null, null, null });
@@ -577,6 +717,16 @@ namespace MapPerfProbe
             return !PeriodicSlicer.RedirectAny(__instance, __originalMethod, "OnHourlyTick");
         }
 
+        // Unified prefix for any periodic hub (instance or static).
+        public static bool PeriodicHub_Prefix(object __instance, MethodBase __originalMethod)
+        {
+            var name = __originalMethod?.Name;
+            if (string.IsNullOrEmpty(name)) return true;
+            if (!IsPeriodic(__originalMethod)) return true;
+            if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
+            return !PeriodicSlicer.RedirectAny(__instance, __originalMethod, name);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static string GetMethodAlias(string methodName)
         {
@@ -585,6 +735,16 @@ namespace MapPerfProbe
             if (string.Equals(methodName, "DailyTick", StringComparison.OrdinalIgnoreCase)) return "OnDailyTick";
             if (string.Equals(methodName, "OnHourlyTick", StringComparison.OrdinalIgnoreCase)) return "HourlyTick";
             if (string.Equals(methodName, "HourlyTick", StringComparison.OrdinalIgnoreCase)) return "OnHourlyTick";
+            if (string.Equals(methodName, "OnWeeklyTick", StringComparison.OrdinalIgnoreCase)) return "WeeklyTick";
+            if (string.Equals(methodName, "WeeklyTick", StringComparison.OrdinalIgnoreCase)) return "OnWeeklyTick";
+            if (string.Equals(methodName, "OnQuarterDailyPartyTick", StringComparison.OrdinalIgnoreCase)) return "QuarterDailyPartyTick";
+            if (string.Equals(methodName, "QuarterDailyPartyTick", StringComparison.OrdinalIgnoreCase)) return "OnQuarterDailyPartyTick";
+            if (string.Equals(methodName, "OnTickPartialHourlyAi", StringComparison.OrdinalIgnoreCase)) return "TickPartialHourlyAi";
+            if (string.Equals(methodName, "TickPartialHourlyAi", StringComparison.OrdinalIgnoreCase)) return "OnTickPartialHourlyAi";
+            if (string.Equals(methodName, "OnPeriodicQuarterDailyTick", StringComparison.OrdinalIgnoreCase)) return "PeriodicQuarterDailyTick";
+            if (string.Equals(methodName, "PeriodicQuarterDailyTick", StringComparison.OrdinalIgnoreCase)) return "OnPeriodicQuarterDailyTick";
+            if (string.Equals(methodName, "OnAiHourlyTick", StringComparison.OrdinalIgnoreCase)) return "AiHourlyTick";
+            if (string.Equals(methodName, "AiHourlyTick", StringComparison.OrdinalIgnoreCase)) return "OnAiHourlyTick";
             return null;
         }
 
@@ -1376,9 +1536,9 @@ namespace MapPerfProbe
                 }
             }
 
-            // Burst sample memory inside periodic roots; otherwise 1/16 sampling
-            bool sample = _traceMem || ((Interlocked.Increment(ref _sample) & 0xF) == 0);
-            if (sample) __state.mem = GC.GetTotalMemory(false);
+            // Attribute allocs only to periodic roots, never per-frame hooks
+            var traceThis = _traceMem && IsPeriodic(__originalMethod) && !IsPerFrameHook(__originalMethod);
+            __state.mem = traceThis ? GC.GetTotalMemory(false) : 0;
             __state.ts = Stopwatch.GetTimestamp();
         }
 
@@ -1394,6 +1554,8 @@ namespace MapPerfProbe
 
             var stat = Stats.GetOrAdd(__originalMethod, _ => new PerfStat(__originalMethod));
             stat.Add(dt);
+
+            var root = _rootPeriodic;
 
             if (__instance != null)
             {
@@ -1424,7 +1586,6 @@ namespace MapPerfProbe
             }
 
             // Attribute to current periodic root
-            var root = _rootPeriodic;
             if (root != null)
             {
                 if (ReferenceEquals(__originalMethod, root))
@@ -1463,57 +1624,60 @@ namespace MapPerfProbe
                 PruneAllocCooldowns(tNow);
             }
 
-            if (_rootPeriodic != null && _callDepth == _rootDepth)
+            if (root != null && _callDepth == _rootDepth)
             {
-                // Dump top children once per burst (limit spam)
-                if (_rootBucket != null)
+                if (_rootBurstTotal >= RootBurstMinTotalMs)
                 {
-                    var list = new List<KeyValuePair<MethodBase, (double sum, int n)>>(_rootBucket);
-                    list.Sort((a, b) => b.Value.sum.CompareTo(a.Value.sum));
-                    var rOwner = root?.DeclaringType?.FullName ?? "<global>";
-                    var rName = root?.Name ?? "<none>";
-                    int take = Math.Min(8, list.Count);
-                    MapPerfLog.Info($"[root-burst] {rOwner}.{rName} — top children:");
-                    var includePct = _rootBurstTotal >= 1.0 && _rootBurstTotal > 0.0;
-                    var dynamicCutoff = Math.Max(RootChildBaseCutoffMs, 0.02 * _rootBurstTotal);
-                    var printed = new HashSet<MethodBase>();
-                    for (int i = 0; i < take; i++)
+                    // Dump top children once per burst (limit spam)
+                    if (_rootBucket != null)
                     {
-                        var kv = list[i];
-                        var pct = includePct ? (100.0 * kv.Value.sum / _rootBurstTotal) : 0.0;
-                        if (kv.Value.sum >= dynamicCutoff || (includePct && pct >= 10.0))
-                        {
-                            LogRootChild(kv.Key, kv.Value.sum, pct, kv.Value.n, includePct);
-                            printed.Add(kv.Key);
-                        }
-                    }
-                    if (includePct)
-                    {
-                        for (int i = take; i < list.Count; i++)
-                        {
-                            var kv = list[i];
-                            var pct = 100.0 * kv.Value.sum / _rootBurstTotal;
-                            if (pct < 10.0) continue;
-                            if (printed.Add(kv.Key))
-                                LogRootChild(kv.Key, kv.Value.sum, pct, kv.Value.n, includePct);
-                        }
-                    }
-                    if (printed.Count == 0)
-                    {
+                        var list = new List<KeyValuePair<MethodBase, (double sum, int n)>>(_rootBucket);
+                        list.Sort((a, b) => b.Value.sum.CompareTo(a.Value.sum));
+                        var rOwner = root?.DeclaringType?.FullName ?? "<global>";
+                        var rName = root?.Name ?? "<none>";
+                        int take = Math.Min(8, list.Count);
+                        MapPerfLog.Info($"[root-burst] {rOwner}.{rName} — top children:");
+                        var includePct = _rootBurstTotal >= 1.0;
+                        var dynamicCutoff = Math.Max(RootChildBaseCutoffMs, 0.02 * _rootBurstTotal);
+                        var printed = new HashSet<MethodBase>();
                         for (int i = 0; i < take; i++)
                         {
                             var kv = list[i];
                             var pct = includePct ? (100.0 * kv.Value.sum / _rootBurstTotal) : 0.0;
-                            LogRootChild(kv.Key, kv.Value.sum, pct, kv.Value.n, includePct);
-                            printed.Add(kv.Key);
+                            if (kv.Value.sum >= dynamicCutoff || (includePct && pct >= 10.0))
+                            {
+                                LogRootChild(kv.Key, kv.Value.sum, pct, kv.Value.n, includePct);
+                                printed.Add(kv.Key);
+                            }
                         }
+                        if (includePct)
+                        {
+                            for (int i = take; i < list.Count; i++)
+                            {
+                                var kv = list[i];
+                                var pct = 100.0 * kv.Value.sum / _rootBurstTotal;
+                                if (pct < 10.0) continue;
+                                if (printed.Add(kv.Key))
+                                    LogRootChild(kv.Key, kv.Value.sum, pct, kv.Value.n, includePct);
+                            }
+                        }
+                        if (printed.Count == 0)
+                        {
+                            for (int i = 0; i < take; i++)
+                            {
+                                var kv = list[i];
+                                var pct = includePct ? (100.0 * kv.Value.sum / _rootBurstTotal) : 0.0;
+                                LogRootChild(kv.Key, kv.Value.sum, pct, kv.Value.n, includePct);
+                                printed.Add(kv.Key);
+                            }
+                        }
+                        double childSum = 0;
+                        for (int i = 0; i < list.Count; i++) childSum += list[i].Value.sum;
+                        var selfMs = _rootBurstTotal - childSum;
+                        if (selfMs < 0) selfMs = 0;
+                        if (printed.Count > 0 || selfMs >= dynamicCutoff)
+                            LogRootSelf(selfMs, _rootBurstTotal);
                     }
-                    double childSum = 0;
-                    for (int i = 0; i < list.Count; i++) childSum += list[i].Value.sum;
-                    var selfMs = _rootBurstTotal - childSum;
-                    if (selfMs < 0) selfMs = 0;
-                    if (printed.Count > 0 || selfMs >= dynamicCutoff)
-                        LogRootSelf(selfMs, _rootBurstTotal);
                 }
                 var nowSeconds = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
                 Interlocked.Exchange(ref _nextRootBurstAllowed, nowSeconds + RootBurstCooldownSeconds);
@@ -1535,7 +1699,7 @@ namespace MapPerfProbe
                 _mapScreenFastTimeValid = false;
             }
             if (__state.ts == 0) return __exception;
-            if (__exception != null && _rootBucket != null && _rootPeriodic != null && _callDepth == _rootDepth)
+            if (__exception != null && _rootBucket != null && _rootPeriodic != null && _callDepth == _rootDepth && _rootBurstTotal >= RootBurstMinTotalMs)
             {
                 var list = new List<KeyValuePair<MethodBase, (double sum, int n)>>(_rootBucket);
                 list.Sort((a, b) => b.Value.sum.CompareTo(a.Value.sum));
@@ -1543,7 +1707,7 @@ namespace MapPerfProbe
                 var rName = _rootPeriodic?.Name ?? "<none>";
                 int take = Math.Min(8, list.Count);
                 MapPerfLog.Info($"[root-burst:EX] {rOwner}.{rName} — top children:");
-                var includePct = _rootBurstTotal >= 1.0 && _rootBurstTotal > 0.0;
+                var includePct = _rootBurstTotal >= 1.0;
                 var dynamicCutoff = Math.Max(RootChildBaseCutoffMs, 0.02 * _rootBurstTotal);
                 var printed = new HashSet<MethodBase>();
                 for (int i = 0; i < take; i++)
@@ -2190,27 +2354,129 @@ namespace MapPerfProbe
         private const double QueuePressureCooldownSeconds = 0.5;
         private const int QueuePressureThreshold = 15_000;
 
+        private readonly struct HandlerKey : IEquatable<HandlerKey>
+        {
+            public HandlerKey(MethodInfo method, object target)
+            {
+                Method = method;
+                Target = target;
+            }
+
+            public MethodInfo Method { get; }
+            public object Target { get; }
+
+            public bool Equals(HandlerKey other)
+                => ReferenceEquals(Method, other.Method) && ReferenceEquals(Target, other.Target);
+
+            public override bool Equals(object obj)
+                => obj is HandlerKey other && Equals(other);
+
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    var methodHash = Method != null ? Method.GetHashCode() : 0;
+                    var targetHash = Target != null ? RuntimeHelpers.GetHashCode(Target) : 0;
+                    return (methodHash * 397) ^ targetHash;
+                }
+            }
+        }
+
+        private static List<Action> DeduplicateHandlers(List<Action> actions)
+        {
+            if (actions == null || actions.Count < 2)
+                return actions;
+
+            var seen = new HashSet<HandlerKey>(actions.Count);
+            var deduped = new List<Action>(actions.Count);
+            for (int i = 0; i < actions.Count; i++)
+            {
+                var action = actions[i];
+                if (action == null) continue;
+
+                var method = action.Method;
+                if (method == null) continue;
+
+                if (seen.Add(new HandlerKey(method, action.Target)))
+                    deduped.Add(action);
+            }
+
+            return deduped.Count == actions.Count ? actions : deduped;
+        }
+
         public static bool RedirectDaily(object dispatcher)
-            => Redirect(dispatcher, "OnDailyTick");
+        {
+            MethodBase hub = null;
+            if (dispatcher != null)
+            {
+                var t = dispatcher.GetType();
+                const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                hub = SubModule.GetZeroParamMethod(t, "OnDailyTick", F)
+                      ?? SubModule.GetZeroParamMethod(t, "DailyTick", F);
+            }
+            return Redirect(dispatcher, hub, "OnDailyTick");
+        }
 
         public static bool RedirectHourly(object dispatcher)
-            => Redirect(dispatcher, "OnHourlyTick");
+        {
+            MethodBase hub = null;
+            if (dispatcher != null)
+            {
+                var t = dispatcher.GetType();
+                const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                hub = SubModule.GetZeroParamMethod(t, "OnHourlyTick", F)
+                      ?? SubModule.GetZeroParamMethod(t, "HourlyTick", F);
+            }
+            return Redirect(dispatcher, hub, "OnHourlyTick");
+        }
 
         public static bool RedirectAny(object instance, MethodBase original, string methodName)
         {
             if (instance != null)
-                return Redirect(instance, methodName);
+                return Redirect(instance, original, methodName);
             var t = original?.DeclaringType;
             return t != null && RedirectStatic(t, original, methodName);
         }
 
-        private static bool Redirect(object dispatcher, string methodName)
+        private static bool Redirect(object dispatcher, MethodBase hub, string methodName)
         {
             try
             {
                 if (dispatcher == null) return false;
-                var actions = DiscoverSubscriberActions(dispatcher, methodName);
-                if (actions.Count == 0) return false;
+                var actions = DiscoverSubscriberActions(dispatcher, hub, methodName);
+                actions = DeduplicateHandlers(actions);
+                var name = hub?.Name ?? methodName;
+                if (actions.Count == 0)
+                {
+                    // Fallback: slice the hub itself (like RedirectStatic) so it never bursts
+                    if (hub is MethodInfo mi &&
+                        !mi.IsAbstract && !mi.ContainsGenericParameters &&
+                        mi.GetParameters().Length == 0)
+                    {
+                        var key = $"{dispatcher.GetType().FullName}:{mi.Name}#{RuntimeHelpers.GetHashCode(dispatcher)}";
+                        if (!EnqueueOnce(key, 50.0)) return true; // recently queued
+                        Action call = () =>
+                        {
+                            EnterBypass(hub);
+                            try
+                            {
+                                mi.Invoke(dispatcher, null);
+                            }
+                            catch (Exception ex)
+                            {
+                                MapPerfLog.Error($"slice hub {mi.DeclaringType?.FullName}.{mi.Name} failed", ex);
+                            }
+                            finally
+                            {
+                                ExitBypass(hub);
+                            }
+                        };
+                        lock (_lock) _q.Enqueue(call);
+                        MapPerfLog.Info($"[slice] queued 1 {mi.Name} (hub fallback)");
+                        return true;
+                    }
+                    return false;
+                }
 
                 int enq = 0;
                 int afterCount = -1;
@@ -2234,13 +2500,13 @@ namespace MapPerfProbe
                 {
                     var shown = Math.Min(enq, 5000);
                     var suffix = enq > shown ? "+" : string.Empty;
-                    MapPerfLog.Info($"[slice] queued {shown}{suffix} {methodName} handlers");
+                    MapPerfLog.Info($"[slice] queued {shown}{suffix} {name} handlers");
                 }
                 return enq > 0;
             }
             catch (Exception ex)
             {
-                MapPerfLog.Error($"slice redirect {methodName} failed", ex);
+                MapPerfLog.Error($"slice redirect {hub?.Name ?? methodName} failed", ex);
                 return false;
             }
         }
@@ -2251,6 +2517,7 @@ namespace MapPerfProbe
             {
                 if (hubType == null) return false;
                 var actions = DiscoverSubscriberActions(hubType, methodName);
+                actions = DeduplicateHandlers(actions);
                 var key = $"{hubType.FullName}:{methodName}";
                 if (actions.Count == 0)
                 {
@@ -2410,11 +2677,34 @@ namespace MapPerfProbe
                 now + (long)(Stopwatch.Frequency * QueuePressureCooldownSeconds));
         }
 
-        private static List<Action> DiscoverSubscriberActions(object dispatcher, string methodName)
+        private static List<Action> DiscoverSubscriberActions(object dispatcher, MethodBase hub, string fallbackName)
         {
             var ret = new List<Action>(256);
-            var t = dispatcher.GetType();
-            const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var t = dispatcher?.GetType() ?? hub?.DeclaringType;
+            if (t == null) return ret;
+            const BindingFlags F = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+
+            var nameSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            void AddName(string candidate)
+            {
+                if (string.IsNullOrEmpty(candidate)) return;
+                if (!nameSet.Add(candidate)) return;
+                var alias = SubModule.GetMethodAlias(candidate);
+                if (!string.IsNullOrEmpty(alias)) nameSet.Add(alias);
+            }
+
+            AddName(hub?.Name);
+            AddName(fallbackName);
+            MethodInfo FindHandler(Type targetType)
+            {
+                if (targetType == null || nameSet.Count == 0) return null;
+                foreach (var name in nameSet)
+                {
+                    var mi = SubModule.GetZeroParamMethod(targetType, name, F);
+                    if (mi != null && !mi.IsAbstract) return mi;
+                }
+                return null;
+            }
 
             void AddIfInvokable(object target)
             {
@@ -2427,8 +2717,14 @@ namespace MapPerfProbe
                         if (one.Method.GetParameters().Length != 0) continue;
                         try
                         {
-                            var action = (Action)one.Method.CreateDelegate(typeof(Action), one.Target);
-                            ret.Add(action);
+                            if (one.Method.IsStatic)
+                            {
+                                ret.Add((Action)one.Method.CreateDelegate(typeof(Action)));
+                            }
+                            else
+                            {
+                                ret.Add((Action)one.Method.CreateDelegate(typeof(Action), one.Target));
+                            }
                         }
                         catch
                         {
@@ -2439,17 +2735,23 @@ namespace MapPerfProbe
                     return;
                 }
 
-                var mi = SubModule.GetZeroParamMethod(target.GetType(), methodName, F);
+                var mi = FindHandler(target.GetType());
                 if (mi != null && !mi.IsAbstract)
                 {
                     try
                     {
-                        var action = (Action)mi.CreateDelegate(typeof(Action), target);
-                        ret.Add(action);
+                        if (mi.IsStatic)
+                        {
+                            ret.Add((Action)mi.CreateDelegate(typeof(Action)));
+                        }
+                        else
+                        {
+                            ret.Add((Action)mi.CreateDelegate(typeof(Action), target));
+                        }
                     }
                     catch
                     {
-                        ret.Add(() => mi.Invoke(target, null));
+                        ret.Add(() => mi.Invoke(mi.IsStatic ? null : target, null));
                     }
                     return;
                 }
@@ -2463,13 +2765,16 @@ namespace MapPerfProbe
             bool NameLooksRelevant(string n)
                 => n != null && (n.IndexOf("daily", StringComparison.OrdinalIgnoreCase) >= 0
                                  || n.IndexOf("hourly", StringComparison.OrdinalIgnoreCase) >= 0
+                                 || n.IndexOf("weekly", StringComparison.OrdinalIgnoreCase) >= 0
+                                 || n.IndexOf("quarter", StringComparison.OrdinalIgnoreCase) >= 0
                                  || n.IndexOf("tick", StringComparison.OrdinalIgnoreCase) >= 0
                                  || n.IndexOf("subscriber", StringComparison.OrdinalIgnoreCase) >= 0);
 
             foreach (var f in t.GetFields(F))
             {
                 if (!NameLooksRelevant(f.Name)) continue;
-                var val = f.GetValue(dispatcher);
+                var target = f.IsStatic ? null : dispatcher;
+                var val = f.GetValue(target);
                 TryExpand(val, AddIfInvokable);
             }
 
@@ -2478,7 +2783,9 @@ namespace MapPerfProbe
                 if (p.GetIndexParameters().Length != 0) continue;
                 if (!NameLooksRelevant(p.Name)) continue;
                 object val = null;
-                try { val = p.GetValue(dispatcher, null); }
+                var getter = p.GetGetMethod(true);
+                var target = getter != null && getter.IsStatic ? null : dispatcher;
+                try { val = p.GetValue(target, null); }
                 catch { }
                 TryExpand(val, AddIfInvokable);
             }
@@ -2486,7 +2793,10 @@ namespace MapPerfProbe
             if (ret.Count == 0)
             {
                 foreach (var f in t.GetFields(F))
-                    TryExpand(f.GetValue(dispatcher), AddIfInvokable);
+                {
+                    var target = f.IsStatic ? null : dispatcher;
+                    TryExpand(f.GetValue(target), AddIfInvokable);
+                }
             }
 
             return ret;
@@ -2499,6 +2809,14 @@ namespace MapPerfProbe
 
             bool NameIsTarget(string n) => SubModule.MatchesMethodAlias(n, methodName);
 
+            bool NameLooksRelevant(string n)
+                => n != null && (n.IndexOf("daily", StringComparison.OrdinalIgnoreCase) >= 0
+                                 || n.IndexOf("hourly", StringComparison.OrdinalIgnoreCase) >= 0
+                                 || n.IndexOf("weekly", StringComparison.OrdinalIgnoreCase) >= 0
+                                 || n.IndexOf("quarter", StringComparison.OrdinalIgnoreCase) >= 0
+                                 || n.IndexOf("tick", StringComparison.OrdinalIgnoreCase) >= 0
+                                 || n.IndexOf("subscriber", StringComparison.OrdinalIgnoreCase) >= 0);
+
             void AddIfInvokable(object target)
             {
                 if (target == null) return;
@@ -2506,10 +2824,17 @@ namespace MapPerfProbe
                 {
                     foreach (var one in del.GetInvocationList())
                     {
+                        if (one.Method.GetParameters().Length != 0) continue;
                         try
                         {
-                            var a = (Action)one;
-                            ret.Add(a);
+                            if (one.Method.IsStatic)
+                            {
+                                ret.Add((Action)one.Method.CreateDelegate(typeof(Action)));
+                            }
+                            else
+                            {
+                                ret.Add((Action)one.Method.CreateDelegate(typeof(Action), one.Target));
+                            }
                         }
                         catch
                         {
@@ -2521,17 +2846,18 @@ namespace MapPerfProbe
                 }
 
                 var mi = SubModule.GetZeroParamMethod(target.GetType(), methodName,
-                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
                 if (mi != null && !mi.IsAbstract)
                 {
                     try
                     {
-                        var action = (Action)mi.CreateDelegate(typeof(Action), target);
-                        ret.Add(action);
+                        ret.Add(mi.IsStatic
+                            ? (Action)mi.CreateDelegate(typeof(Action))
+                            : (Action)mi.CreateDelegate(typeof(Action), target));
                     }
                     catch
                     {
-                        ret.Add(() => mi.Invoke(target, null));
+                        ret.Add(() => mi.Invoke(mi.IsStatic ? null : target, null));
                     }
                     return;
                 }
@@ -2568,6 +2894,20 @@ namespace MapPerfProbe
                 {
                     TryExpand(f.GetValue(null), AddIfInvokable);
                 }
+            }
+
+            PropertyInfo[] props;
+            try { props = hubType.GetProperties(F); }
+            catch { props = Array.Empty<PropertyInfo>(); }
+
+            foreach (var p in props)
+            {
+                if (p.GetIndexParameters().Length != 0) continue;
+                if (!NameLooksRelevant(p.Name)) continue;
+                object val = null;
+                try { val = p.GetValue(null, null); }
+                catch { }
+                TryExpand(val, AddIfInvokable);
             }
 
             return ret;
