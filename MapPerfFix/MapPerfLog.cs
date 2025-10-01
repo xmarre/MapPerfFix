@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading;
 
 namespace MapPerfProbe
 {
@@ -13,10 +14,23 @@ namespace MapPerfProbe
         private const long MaxBytes = 5L * 1024 * 1024;
         private const int MaxBackups = 3;
         private static string _path = DefaultPath;
+        private static int _debugEnabled;
 
         static MapPerfLog()
         {
             try { EnsureDir(); RotateIfNeeded(); } catch { }
+        }
+
+        public static bool DebugEnabled
+        {
+            get => Volatile.Read(ref _debugEnabled) != 0;
+            set => Interlocked.Exchange(ref _debugEnabled, value ? 1 : 0);
+        }
+
+        public static void Debug(string msg)
+        {
+            if (!DebugEnabled) return;
+            Write("DEBUG", msg, null);
         }
 
         public static void Info(string msg) => Write("INFO", msg, null);
