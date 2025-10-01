@@ -3098,8 +3098,8 @@ namespace MapPerfProbe
                 enqueued = handledDirect;
                 return handledDirect;
             }
-
-            var key = new HourlyHubKey(hub, dispatcher, hour);
+            var hubInfo = hub as MethodInfo;
+            var key = new HourlyHubKey(hubInfo, dispatcher, hour);
             if (!TryEnterHourlyGate(key))
                 return true;
 
