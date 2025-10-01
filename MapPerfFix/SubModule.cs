@@ -141,10 +141,10 @@ namespace MapPerfProbe
         internal static bool FastSnapshot => _snapFast;
         internal static bool FastOrPausedSnapshot => _snapPaused || _snapFast;
         private const double PumpBudgetRunMs = 3.0;
-        private const double PumpBudgetFastMs = 4.0;
+        private const double PumpBudgetFastMs = 8.0;
         private const double PumpBudgetPausedMs = 16.0;
         private const double PumpBudgetRunBoostMs = 4.0;
-        private const double PumpBudgetFastBoostMs = 6.0;
+        private const double PumpBudgetFastBoostMs = 12.0;
         private const int PumpBacklogBoostThreshold = 10_000;
         private const int ChildInlineAllowEveryN = 120;
         private const int ChildInlineAllowanceMin = 8;
@@ -477,6 +477,8 @@ namespace MapPerfProbe
                     : (fast
                         ? (queueLength >= PumpBacklogBoostThreshold ? PumpBudgetFastBoostMs : PumpBudgetFastMs)
                         : (queueLength >= PumpBacklogBoostThreshold ? PumpBudgetRunBoostMs : PumpBudgetRunMs));
+                if (!paused && overBudget)
+                    pumpBudget = 0.0;
                 PeriodicSlicer.Pump(msBudget: pumpBudget);
             }
         }
@@ -2913,6 +2915,24 @@ namespace MapPerfProbe
             });
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool TryDeferHubInvoke(object target, MethodInfo mi, MethodBase bypassKey)
+        {
+            if (mi == null || mi.IsAbstract || mi.ContainsGenericParameters || mi.GetParameters().Length != 0)
+                return false;
+            if (!SubModule.FastOrPausedSnapshot)
+                return false;
+
+            return EnqueueActionWithBypass(bypassKey ?? mi, () =>
+            {
+                try { mi.Invoke(target, null); }
+                catch (Exception ex)
+                {
+                    MapPerfLog.Error($"slice hub {mi.DeclaringType?.FullName}.{mi.Name} failed", ex);
+                }
+            });
+        }
+
         private static bool Redirect(object dispatcher, MethodBase hub, string methodName)
         {
             try
@@ -2977,7 +2997,11 @@ namespace MapPerfProbe
                 }
                 var name = hub?.Name ?? methodName;
                 if (actions.Count == 0)
+                {
+                    if (TryDeferHubInvoke(dispatcher, hub as MethodInfo, hub))
+                        return true;
                     return false;
+                }
 
                 int enq = 0;
                 int afterCount = -1;
@@ -2985,6 +3009,8 @@ namespace MapPerfProbe
                 {
                     int room = Math.Max(0, MaxQueued - _qHandlers.Count);
                     enq = Math.Min(room, actions.Count);
+                    if (SubModule.FastSnapshot)
+                        enq = Math.Min(enq, 1);
                     for (int i = 0; i < enq; i++) _qHandlers.Enqueue(actions[i]);
                     if (enq < actions.Count)
                     {
@@ -3060,7 +3086,11 @@ namespace MapPerfProbe
                 }
 
                 if (actions.Count == 0)
+                {
+                    if (TryDeferHubInvoke(null, hubKey as MethodInfo, hubKey))
+                        return true;
                     return false;
+                }
 
                 int enq;
                 int after;
@@ -3068,6 +3098,8 @@ namespace MapPerfProbe
                 {
                     int room = Math.Max(0, MaxQueued - _qHandlers.Count);
                     enq = Math.Min(room, actions.Count);
+                    if (SubModule.FastSnapshot)
+                        enq = Math.Min(enq, 1);
                     for (int i = 0; i < enq; i++) _qHandlers.Enqueue(actions[i]);
                     if (enq < actions.Count)
                     {
@@ -3123,8 +3155,9 @@ namespace MapPerfProbe
             int pumped = 0;
             var throttle = !SubModule.PausedSnapshot;
             var overrunLimit = throttle
-                ? (SubModule.FastSnapshot ? 6.0 : 4.0)
+                ? (SubModule.FastSnapshot ? 2.5 : 3.5)
                 : double.PositiveInfinity;
+            var pumpedCap = throttle ? (SubModule.FastSnapshot ? 1 : 2) : int.MaxValue;
             while (true)
             {
                 Action action = null;
@@ -3139,11 +3172,15 @@ namespace MapPerfProbe
                 try { action(); }
                 catch (Exception ex) { MapPerfLog.Error("[slice] pumped action failed", ex); }
                 var tookMs = (Stopwatch.GetTimestamp() - before) * SubModule.TicksToMs;
+                if (SubModule.FastSnapshot && tookMs > 3.0)
+                    MapPerfLog.Warn($"[slice] long action {tookMs:F1} ms (fast)");
                 pumped++;
                 budget -= Math.Max(0.0, tookMs);
 
                 if (budget <= 0.0) break;
                 if (throttle && tookMs > overrunLimit)
+                    break;
+                if (pumped >= pumpedCap)
                     break;
             }
 
