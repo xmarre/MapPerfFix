@@ -470,19 +470,16 @@ namespace MapPerfProbe
                     FlushSummary(force: false);
             }
 
-            // Drain slices even while paused to avoid backlog cliffs
-            if (onMap)
-            {
-                PeriodicSlicer.GetQueueStats(out var queueLength, out _, out _);
-                var pumpBudget = paused
-                    ? PumpBudgetPausedMs
-                    : (fast
-                        ? (queueLength >= PumpBacklogBoostThreshold ? PumpBudgetFastBoostMs : PumpBudgetFastMs)
-                        : (queueLength >= PumpBacklogBoostThreshold ? PumpBudgetRunBoostMs : PumpBudgetRunMs));
-                if (!paused && overBudget)
-                    pumpBudget = Math.Max(0.5, pumpBudget * 0.25);
-                PeriodicSlicer.Pump(msBudget: pumpBudget);
-            }
+            // Always drain slices (map, menus, paused) to avoid backlog cliffs and expose drift.
+            PeriodicSlicer.GetQueueStats(out var queueLength, out _, out _);
+            var pumpBudget = paused
+                ? PumpBudgetPausedMs
+                : (fast
+                    ? (queueLength >= PumpBacklogBoostThreshold ? PumpBudgetFastBoostMs : PumpBudgetFastMs)
+                    : (queueLength >= PumpBacklogBoostThreshold ? PumpBudgetRunBoostMs : PumpBudgetRunMs));
+            if (!paused && overBudget)
+                pumpBudget = Math.Max(0.5, pumpBudget * 0.25);
+            PeriodicSlicer.Pump(msBudget: pumpBudget);
         }
 
         [DllImport("kernel32.dll")]
@@ -3182,8 +3179,10 @@ namespace MapPerfProbe
         {
             if (msBudget <= 0.0) return;
 
-            var start = Stopwatch.GetTimestamp();
-            var deadline = start + (long)(msBudget * SubModule.MsToTicks);
+            var budgetTicks = (long)(msBudget * SubModule.MsToTicks);
+            var globalStart = Stopwatch.GetTimestamp();
+            var start = globalStart;
+            var deadline = start + budgetTicks;
             PumpDeadlineTicks = deadline;
             double budget = msBudget;
             int pumped = 0;
@@ -3192,11 +3191,13 @@ namespace MapPerfProbe
                 ? (SubModule.FastSnapshot ? 2.5 : 3.5)
                 : double.PositiveInfinity;
             var pumpedCap = throttle ? (SubModule.FastSnapshot ? 1 : 2) : int.MaxValue;
+            long overshoot = 0;
             try
             {
                 while (true)
                 {
                     Action action = null;
+                    if (Stopwatch.GetTimestamp() >= deadline) break;
                     lock (_lock)
                     {
                         if (_qHandlers.Count == 0)
@@ -3223,11 +3224,19 @@ namespace MapPerfProbe
             finally
             {
                 PumpDeadlineTicks = 0;
+                var end = Stopwatch.GetTimestamp();
+                overshoot = (end - globalStart) - budgetTicks;
             }
 
             int remaining;
             lock (_lock) remaining = _qHandlers.Count;
             var now = Stopwatch.GetTimestamp();
+            if (overshoot > 0)
+            {
+                var overshootMs = overshoot * SubModule.TicksToMs;
+                MapPerfLog.Warn($"[slice] pump overshoot {overshootMs:F2} ms " +
+                                $"(pumped {pumped}, rem {remaining}, paused {SubModule.PausedSnapshot})");
+            }
             if (pumped > 0 && (remaining == 0 || pumped >= 64) &&
                 now >= Volatile.Read(ref _nextPumpLogTs))
             {
