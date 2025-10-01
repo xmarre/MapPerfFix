@@ -3406,7 +3406,7 @@ namespace MapPerfProbe
                 var name = hub?.Name ?? methodName;
                 if (actions.Count == 0)
                 {
-                    if (TryDeferHubInvoke(dispatcher, hub as MethodInfo, hub, onComplete))
+                    if (TryDeferHubInvoke(dispatcher, hubMethod, hub, onComplete))
                         return true;
                     return false;
                 }
@@ -3430,6 +3430,7 @@ namespace MapPerfProbe
                                    BindingFlags.Public | BindingFlags.NonPublic |
                                    BindingFlags.Static | BindingFlags.Instance);
                 var hubName = hubKey?.Name ?? methodName;
+                var hubInfo = hubKey as MethodInfo;
                 List<Action> actions;
                 if (hubKey != null && _hubHasHandlers.TryGetValue(hubKey, out var hasHandlers) && !hasHandlers)
                 {
@@ -3466,7 +3467,7 @@ namespace MapPerfProbe
 
                 if (actions.Count == 0)
                 {
-                    if (TryDeferHubInvoke(null, hubKey as MethodInfo, hubKey, onComplete))
+                    if (TryDeferHubInvoke(null, hubInfo, hubKey, onComplete))
                         return true;
                     return false;
                 }
