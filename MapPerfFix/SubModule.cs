@@ -3321,8 +3321,11 @@ namespace MapPerfProbe
                     bin--;
                 Interlocked.Increment(ref OvershootBins[bin]);
                 var lvlWarn = SubModule.PausedSnapshot ? overshootMs > 4.0 : overshootMs > 2.0;
-                (lvlWarn ? MapPerfLog.Warn : MapPerfLog.Info)(
-                    $"[slice] pump overshoot {overshootMs:F2} ms (pumped {pumped}, rem {remaining}, paused {SubModule.PausedSnapshot})");
+                var msg = $"[slice] pump overshoot {overshootMs:F2} ms (pumped {pumped}, rem {remaining}, paused {SubModule.PausedSnapshot})";
+                if (lvlWarn)
+                    MapPerfLog.Warn(msg);
+                else
+                    MapPerfLog.Info(msg);
             }
             if (string.IsNullOrEmpty(exitReason))
                 exitReason = "done";
