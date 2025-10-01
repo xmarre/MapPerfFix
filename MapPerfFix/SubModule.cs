@@ -159,6 +159,13 @@ namespace MapPerfProbe
         internal static double TicksToMs => TicksToMsConst;
         private const double BytesPerKiB = 1024.0;
 
+        internal static void ResetChildBackpressureCounters()
+        {
+            Interlocked.Exchange(ref _childBacklogToken, 0);
+            Interlocked.Exchange(ref _childBackpressureSkips, 0);
+            _childBackpressureSkipsByMethod.Clear();
+        }
+
         private struct AllocWarnBudget
         {
             public double NextReset;
@@ -3097,8 +3104,7 @@ namespace MapPerfProbe
                 if (_qHandlers.Count != 0)
                     return;
                 _queueBackpressureLatched = false;
-                Interlocked.Exchange(ref _childBacklogToken, 0);
-                Interlocked.Exchange(ref _childBackpressureSkips, 0);
+                SubModule.ResetChildBackpressureCounters();
             }
 
             _handlerCache.Clear();
@@ -3107,7 +3113,6 @@ namespace MapPerfProbe
             _hubNoHandlersUntilInst.Clear();
             _hubHasHandlers.Clear();
             _hubNoHandlersUntil.Clear();
-            _childBackpressureSkipsByMethod.Clear();
         }
 
         public static void Pump(double msBudget)
