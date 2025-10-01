@@ -147,10 +147,10 @@ namespace MapPerfProbe
         internal static bool FastSnapshot => _snapFast;
         internal static bool FastOrPausedSnapshot => _snapPaused || _snapFast;
         private const double PumpBudgetRunMs = 3.0;
-        private const double PumpBudgetFastMs = 6.0;
+        private const double PumpBudgetFastMs = 8.0;
         private const double PumpBudgetPausedMs = 16.0;
         private const double PumpBudgetRunBoostMs = 4.0;
-        private const double PumpBudgetFastBoostMs = 12.0;
+        private const double PumpBudgetFastBoostMs = 16.0;
         internal const int PumpBacklogBoostThreshold = 10_000;
         private const int ChildInlineAllowEveryN = 120;
         private const int ChildInlineAllowanceMin = 8;
@@ -2852,7 +2852,7 @@ namespace MapPerfProbe
                 // The pump runs single-threaded on the main thread; if that changes, index management needs synchronization.
                 var headroomTicks = (long)(1.5 * SubModule.MsToTicks);
                 var batchLabel = string.IsNullOrEmpty(Name) ? "<batch>" : Name;
-                var maxPerRun = SubModule.PausedSnapshot ? 24 : (SubModule.FastSnapshot ? 8 : 12);
+                var maxPerRun = SubModule.PausedSnapshot ? 24 : (SubModule.FastSnapshot ? 4 : 12);
                 if (maxPerRun < 1) maxPerRun = 1;
                 var processed = 0;
                 while (Index < List.Count)
@@ -3523,8 +3523,10 @@ namespace MapPerfProbe
             double budget = msBudget;
             int pumped = 0;
             var throttle = true;
-            var overrunLimit = SubModule.PausedSnapshot ? 32.0 : (SubModule.FastSnapshot ? 2.5 : 3.5);
-            var pumpedCap = SubModule.PausedSnapshot ? 12 : (SubModule.FastSnapshot ? 1 : 2);
+            var overrunLimit = SubModule.PausedSnapshot ? 32.0
+                : (SubModule.FastSnapshot ? 6.0 : 3.5);
+            var pumpedCap = SubModule.PausedSnapshot ? 12
+                : (SubModule.FastSnapshot ? Math.Min(8, 2 + QueueLength / 2000) : 2);
             long overshoot = 0;
             var pumpHeadroomTicks = (long)(2.0 * SubModule.MsToTicks);
             string exitReason = string.Empty;
@@ -3592,12 +3594,11 @@ namespace MapPerfProbe
                 while (bin > 0 && overshootMs <= edges[bin - 1])
                     bin--;
                 Interlocked.Increment(ref OvershootBins[bin]);
-                var lvlWarn = SubModule.PausedSnapshot ? overshootMs > 4.0 : overshootMs > 2.0;
                 var msg = $"[slice] pump overshoot {overshootMs:F2} ms (pumped {pumped}, rem {remaining}, paused {SubModule.PausedSnapshot})";
-                if (lvlWarn)
+                if (overshootMs > 8.0)
                     MapPerfLog.Warn(msg);
                 else
-                    MapPerfLog.Info(msg);
+                    MapPerfLog.Debug(msg);
             }
             if (string.IsNullOrEmpty(exitReason))
                 exitReason = "done";
