@@ -142,7 +142,7 @@ namespace MapPerfProbe
         internal static bool FastSnapshot => _snapFast;
         internal static bool FastOrPausedSnapshot => _snapPaused || _snapFast;
         private const double PumpBudgetRunMs = 3.0;
-        private const double PumpBudgetFastMs = 8.0;
+        private const double PumpBudgetFastMs = 6.0;
         private const double PumpBudgetPausedMs = 16.0;
         private const double PumpBudgetRunBoostMs = 4.0;
         private const double PumpBudgetFastBoostMs = 12.0;
@@ -2640,6 +2640,12 @@ namespace MapPerfProbe
         private static long _nextQueuedHandlersLogTs;
         private static long _nextQueuePressureLogTs;
         private static long _nextQueueDropLogTs;
+        private static long _exitHeadroom;
+        private static long _exitEmpty;
+        private static long _exitBudget;
+        private static long _exitOverrun;
+        private static long _exitCap;
+        private static long _exitDone;
         private const double PumpLogCooldownSeconds = 0.5;
         private const double QueuePressureCooldownSeconds = 0.5;
         private const int QueuePressureThreshold = 15_000;
@@ -2657,6 +2663,12 @@ namespace MapPerfProbe
         private static readonly int BatchBacklogThreshold = Math.Min(QueuePressureThreshold, SubModule.PumpBacklogBoostThreshold);
         private const double BatchChildErrorCooldownSeconds = 0.25;
         private static long _nextBatchChildErrorLogTs;
+        private static readonly double[] OvershootEdgesMs = { 0.25, 0.5, 1, 2, 4, 8, 16, 32 };
+        private static readonly long[] OvershootBins = new long[9];
+        private const double LongChildLogCooldownSeconds = 0.5;
+        private static readonly long LongChildLogCooldownTicks = (long)(Stopwatch.Frequency * LongChildLogCooldownSeconds);
+        private static readonly ConcurrentDictionary<string, long> LongChildNextLogTicks =
+            new ConcurrentDictionary<string, long>(StringComparer.Ordinal);
         [ThreadStatic] internal static long PumpDeadlineTicks;
 
         private sealed class BatchThunk
@@ -2683,12 +2695,62 @@ namespace MapPerfProbe
                     ? Math.Min(localDeadline, pumpDeadline)
                     : localDeadline;
                 // The pump runs single-threaded on the main thread; if that changes, index management needs synchronization.
+                var headroomTicks = (long)(1.5 * SubModule.MsToTicks);
+                var batchLabel = string.IsNullOrEmpty(Name) ? "<batch>" : Name;
                 while (Index < List.Count)
                 {
-                    try { List[Index++](); }
-                    catch (Exception ex) { MaybeLogBatchChildError(Name, ex); }
+                    var now = Stopwatch.GetTimestamp();
+                    if (now + headroomTicks >= deadline)
+                        break;
 
-                    if (Stopwatch.GetTimestamp() >= deadline)
+                    var childIndex = Index;
+                    var child = List[childIndex];
+                    var t0 = now;
+                    try
+                    {
+                        child();
+                    }
+                    catch (Exception ex)
+                    {
+                        MaybeLogBatchChildError(batchLabel, ex);
+                    }
+                    finally
+                    {
+                        Index = childIndex + 1;
+                    }
+
+                    var after = Stopwatch.GetTimestamp();
+                    var elapsedMs = (after - t0) * SubModule.TicksToMs;
+                    var limit = SubModule.PausedSnapshot ? 16.0 : 6.0;
+                    if (elapsedMs > limit)
+                    {
+                        var method = child.Method;
+                        string who;
+                        if (method != null)
+                        {
+                            var typeName = method.DeclaringType?.Name;
+                            var methodName = method.Name;
+                            if (!string.IsNullOrEmpty(typeName))
+                            {
+                                who = string.IsNullOrEmpty(methodName) ? typeName : typeName + "." + methodName;
+                            }
+                            else
+                            {
+                                who = methodName ?? batchLabel;
+                            }
+                        }
+                        else
+                        {
+                            who = batchLabel;
+                        }
+
+                        if (ShouldLogLongChild(who, after))
+                        {
+                            MapPerfLog.Warn($"[slice] long child {who} #{childIndex} {elapsedMs:F1} ms (paused {SubModule.PausedSnapshot})");
+                        }
+                    }
+
+                    if (after >= deadline)
                         break;
                 }
                 if (Index < List.Count)
@@ -3192,16 +3254,25 @@ namespace MapPerfProbe
                 : double.PositiveInfinity;
             var pumpedCap = throttle ? (SubModule.FastSnapshot ? 1 : 2) : int.MaxValue;
             long overshoot = 0;
+            var pumpHeadroomTicks = (long)(2.0 * SubModule.MsToTicks);
+            string exitReason = string.Empty;
             try
             {
                 while (true)
                 {
                     Action action = null;
-                    if (Stopwatch.GetTimestamp() >= deadline) break;
+                    if (Stopwatch.GetTimestamp() + pumpHeadroomTicks >= deadline)
+                    {
+                        exitReason = "headroom";
+                        break;
+                    }
                     lock (_lock)
                     {
                         if (_qHandlers.Count == 0)
+                        {
+                            exitReason = "empty";
                             break;
+                        }
                         action = _qHandlers.Dequeue();
                     }
 
@@ -3214,11 +3285,21 @@ namespace MapPerfProbe
                     pumped++;
                     budget -= Math.Max(0.0, tookMs);
 
-                    if (budget <= 0.0) break;
+                    if (budget <= 0.0)
+                    {
+                        exitReason = "budget";
+                        break;
+                    }
                     if (throttle && tookMs > overrunLimit)
+                    {
+                        exitReason = "overrun";
                         break;
+                    }
                     if (pumped >= pumpedCap)
+                    {
+                        exitReason = "cap";
                         break;
+                    }
                 }
             }
             finally
@@ -3234,15 +3315,93 @@ namespace MapPerfProbe
             if (overshoot > 0)
             {
                 var overshootMs = overshoot * SubModule.TicksToMs;
-                MapPerfLog.Warn($"[slice] pump overshoot {overshootMs:F2} ms " +
-                                $"(pumped {pumped}, rem {remaining}, paused {SubModule.PausedSnapshot})");
+                var edges = OvershootEdgesMs;
+                var bin = edges.Length;
+                while (bin > 0 && overshootMs <= edges[bin - 1])
+                    bin--;
+                Interlocked.Increment(ref OvershootBins[bin]);
+                var lvlWarn = SubModule.PausedSnapshot ? overshootMs > 4.0 : overshootMs > 2.0;
+                (lvlWarn ? MapPerfLog.Warn : MapPerfLog.Info)(
+                    $"[slice] pump overshoot {overshootMs:F2} ms (pumped {pumped}, rem {remaining}, paused {SubModule.PausedSnapshot})");
             }
+            if (string.IsNullOrEmpty(exitReason))
+                exitReason = "done";
+
+            switch (exitReason)
+            {
+                case "headroom":
+                    Interlocked.Increment(ref _exitHeadroom);
+                    break;
+                case "empty":
+                    Interlocked.Increment(ref _exitEmpty);
+                    break;
+                case "budget":
+                    Interlocked.Increment(ref _exitBudget);
+                    break;
+                case "overrun":
+                    Interlocked.Increment(ref _exitOverrun);
+                    break;
+                case "cap":
+                    Interlocked.Increment(ref _exitCap);
+                    break;
+                case "done":
+                    Interlocked.Increment(ref _exitDone);
+                    break;
+            }
+
             if (pumped > 0 && (remaining == 0 || pumped >= 64) &&
                 now >= Volatile.Read(ref _nextPumpLogTs))
             {
-                MapPerfLog.Info($"[slice] pumped {pumped} (rem {remaining})");
+                long ReadExit(ref long value) => Interlocked.Read(ref value);
+                MapPerfLog.Info(
+                    $"[slice] pumped {pumped} (rem {remaining}) reason={exitReason} dist " +
+                    $"H:{ReadExit(ref _exitHeadroom)} E:{ReadExit(ref _exitEmpty)} " +
+                    $"B:{ReadExit(ref _exitBudget)} O:{ReadExit(ref _exitOverrun)} " +
+                    $"C:{ReadExit(ref _exitCap)} D:{ReadExit(ref _exitDone)}");
+                long ReadBin(int i) => Interlocked.Read(ref OvershootBins[i]);
+                MapPerfLog.Info(
+                    "[slice] overshoot ms bins: " +
+                    $"<=0.25:{ReadBin(0)} <=0.5:{ReadBin(1)} <=1:{ReadBin(2)} <=2:{ReadBin(3)} " +
+                    $"<=4:{ReadBin(4)} <=8:{ReadBin(5)} <=16:{ReadBin(6)} <=32:{ReadBin(7)} >32:{ReadBin(8)}");
+                ResetPumpStatsWindow();
                 Volatile.Write(ref _nextPumpLogTs, now + (long)(Stopwatch.Frequency * PumpLogCooldownSeconds));
             }
+        }
+
+        private static bool ShouldLogLongChild(string key, long now)
+        {
+            if (string.IsNullOrEmpty(key))
+                return true;
+
+            var dict = LongChildNextLogTicks;
+            while (true)
+            {
+                if (!dict.TryGetValue(key, out var nextAllowed))
+                {
+                    if (dict.TryAdd(key, now + LongChildLogCooldownTicks))
+                        return true;
+                    continue;
+                }
+
+                if (now < nextAllowed)
+                    return false;
+
+                var updated = now + LongChildLogCooldownTicks;
+                if (dict.TryUpdate(key, updated, nextAllowed))
+                    return true;
+            }
+        }
+
+        private static void ResetPumpStatsWindow()
+        {
+            Interlocked.Exchange(ref _exitHeadroom, 0);
+            Interlocked.Exchange(ref _exitEmpty, 0);
+            Interlocked.Exchange(ref _exitBudget, 0);
+            Interlocked.Exchange(ref _exitOverrun, 0);
+            Interlocked.Exchange(ref _exitCap, 0);
+            Interlocked.Exchange(ref _exitDone, 0);
+            for (int i = 0; i < OvershootBins.Length; i++)
+                Interlocked.Exchange(ref OvershootBins[i], 0);
         }
 
         private static void MaybeLogBatchChildError(string name, Exception ex)
