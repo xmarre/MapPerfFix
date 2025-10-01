@@ -134,6 +134,7 @@ namespace MapPerfProbe
         private static PropertyInfo _gsmCurrentProp;
         private static PropertyInfo _gsmActiveStateProp;
         private static readonly double TicksToMsConst = 1000.0 / Stopwatch.Frequency;
+        private static readonly double MsToTicksConst = Stopwatch.Frequency / 1000.0;
         // Per-frame cheap flags (avoid reflection in PeriodicSlicer)
         private static volatile bool _snapPaused;
         private static volatile bool _snapFast;
@@ -145,7 +146,7 @@ namespace MapPerfProbe
         private const double PumpBudgetPausedMs = 16.0;
         private const double PumpBudgetRunBoostMs = 4.0;
         private const double PumpBudgetFastBoostMs = 12.0;
-        private const int PumpBacklogBoostThreshold = 10_000;
+        internal const int PumpBacklogBoostThreshold = 10_000;
         private const int ChildInlineAllowEveryN = 120;
         private const int ChildInlineAllowanceMin = 8;
         private const int ChildInlineAllowanceHalfThresholdPct = 95;
@@ -157,6 +158,7 @@ namespace MapPerfProbe
         private static readonly ConcurrentDictionary<MethodBase, int> _childBackpressureSkipsByMethod =
             new ConcurrentDictionary<MethodBase, int>();
         internal static double TicksToMs => TicksToMsConst;
+        internal static double MsToTicks => MsToTicksConst;
         private const double BytesPerKiB = 1024.0;
 
         internal static void ResetChildBackpressureCounters()
@@ -478,7 +480,7 @@ namespace MapPerfProbe
                         ? (queueLength >= PumpBacklogBoostThreshold ? PumpBudgetFastBoostMs : PumpBudgetFastMs)
                         : (queueLength >= PumpBacklogBoostThreshold ? PumpBudgetRunBoostMs : PumpBudgetRunMs));
                 if (!paused && overBudget)
-                    pumpBudget = 0.0;
+                    pumpBudget = Math.Max(0.5, pumpBudget * 0.25);
                 PeriodicSlicer.Pump(msBudget: pumpBudget);
             }
         }
@@ -2655,6 +2657,53 @@ namespace MapPerfProbe
         private const double HandlerCacheRefreshMs = 5000.0;
         private const int HandlerCacheMax = 16384;
         private const double HubNoHandlersRetryMs = 5000.0;
+        private static readonly int BatchBacklogThreshold = Math.Min(QueuePressureThreshold, SubModule.PumpBacklogBoostThreshold);
+        private const double BatchChildErrorCooldownSeconds = 0.25;
+        private static long _nextBatchChildErrorLogTs;
+        [ThreadStatic] internal static long PumpDeadlineTicks;
+
+        private sealed class BatchThunk
+        {
+            public readonly List<Action> List;
+            public int Index;
+            public readonly string Name;
+
+            public BatchThunk(List<Action> list, string name)
+            {
+                List = list;
+                Name = name;
+            }
+
+            public void Run()
+            {
+                var q = QueueLength;
+                var budgetMs = SubModule.FastSnapshot ? 1.5 :
+                    (SubModule.PausedSnapshot ? 4.0 : (q >= BatchBacklogThreshold ? 4.0 : 3.0));
+                var start = Stopwatch.GetTimestamp();
+                var localDeadline = start + (long)(budgetMs * SubModule.MsToTicks);
+                var pumpDeadline = PumpDeadlineTicks;
+                var deadline = pumpDeadline != 0
+                    ? Math.Min(localDeadline, pumpDeadline)
+                    : localDeadline;
+                // The pump runs single-threaded on the main thread; if that changes, index management needs synchronization.
+                while (Index < List.Count)
+                {
+                    try { List[Index++](); }
+                    catch (Exception ex) { MaybeLogBatchChildError(Name, ex); }
+
+                    if (Stopwatch.GetTimestamp() >= deadline)
+                        break;
+                }
+                if (Index < List.Count)
+                {
+                    if (!PeriodicSlicer.EnqueueAction(Run))
+                    {
+                        TryLogQueueDrop(List.Count - Index);
+                    }
+                }
+                // Handler lists are cached for reuse; keep the list intact for future batches once drained.
+            }
+        }
 
         private readonly struct HandlerKey : IEquatable<HandlerKey>
         {
@@ -2793,6 +2842,43 @@ namespace MapPerfProbe
             if (count >= QueuePressureThreshold)
                 TryLogQueuePressure_NoLock(count);
             return true;
+        }
+
+        private static bool EnqueueBatch(List<Action> actions, string name)
+        {
+            if (actions == null || actions.Count == 0) return false;
+
+            var thunk = new BatchThunk(actions, name);
+            if (!EnqueueAction(thunk.Run))
+            {
+                TryLogQueueDrop(actions.Count);
+                return false;
+            }
+
+            var now = Stopwatch.GetTimestamp();
+            if (now >= Volatile.Read(ref _nextQueuedHandlersLogTs))
+            {
+                var shown = Math.Min(actions.Count, 5000);
+                var suffix = actions.Count > shown ? "+" : string.Empty;
+                var label = string.IsNullOrEmpty(name) ? "" : $" {name}";
+                MapPerfLog.Info($"[slice] queued {shown}{suffix}{label} handlers");
+                Volatile.Write(ref _nextQueuedHandlersLogTs,
+                    now + (long)(Stopwatch.Frequency * QueuedHandlersLogCooldownSeconds));
+            }
+
+            return true;
+        }
+
+        internal static int QueueLength
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get
+            {
+                lock (_lock)
+                {
+                    return _qHandlers.Count;
+                }
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -3003,36 +3089,7 @@ namespace MapPerfProbe
                     return false;
                 }
 
-                int enq = 0;
-                int afterCount = -1;
-                lock (_lock)
-                {
-                    int room = Math.Max(0, MaxQueued - _qHandlers.Count);
-                    enq = Math.Min(room, actions.Count);
-                    if (SubModule.FastSnapshot)
-                        enq = Math.Min(enq, 1);
-                    for (int i = 0; i < enq; i++) _qHandlers.Enqueue(actions[i]);
-                    if (enq < actions.Count)
-                    {
-                        var dropped = actions.Count - enq;
-                        TryLogQueueDrop(dropped);
-                    }
-                    afterCount = _qHandlers.Count;
-                }
-                if (afterCount >= QueuePressureThreshold) TryLogQueuePressure_NoLock(afterCount);
-                if (enq > 0)
-                {
-                    var now = Stopwatch.GetTimestamp();
-                    if (now >= Volatile.Read(ref _nextQueuedHandlersLogTs))
-                    {
-                        var shown = Math.Min(enq, 5000);
-                        var suffix = enq > shown ? "+" : string.Empty;
-                        MapPerfLog.Info($"[slice] queued {shown}{suffix} {name} handlers");
-                        Volatile.Write(ref _nextQueuedHandlersLogTs,
-                            now + (long)(Stopwatch.Frequency * QueuedHandlersLogCooldownSeconds));
-                    }
-                }
-                return enq > 0;
+                return EnqueueBatch(actions, name);
             }
             catch (Exception ex)
             {
@@ -3092,36 +3149,10 @@ namespace MapPerfProbe
                     return false;
                 }
 
-                int enq;
-                int after;
-                lock (_lock)
-                {
-                    int room = Math.Max(0, MaxQueued - _qHandlers.Count);
-                    enq = Math.Min(room, actions.Count);
-                    if (SubModule.FastSnapshot)
-                        enq = Math.Min(enq, 1);
-                    for (int i = 0; i < enq; i++) _qHandlers.Enqueue(actions[i]);
-                    if (enq < actions.Count)
-                    {
-                        var dropped = actions.Count - enq;
-                        TryLogQueueDrop(dropped);
-                    }
-                    after = _qHandlers.Count;
-                }
-                if (after >= QueuePressureThreshold) TryLogQueuePressure_NoLock(after);
-                if (enq > 0)
-                {
-                    var now = Stopwatch.GetTimestamp();
-                    if (now >= Volatile.Read(ref _nextQueuedHandlersLogTs))
-                    {
-                        var shown = Math.Min(enq, 5000);
-                        var suffix = enq > shown ? "+" : string.Empty;
-                        MapPerfLog.Info($"[slice] queued {shown}{suffix} {hubName} handlers (static hub)");
-                        Volatile.Write(ref _nextQueuedHandlersLogTs,
-                            now + (long)(Stopwatch.Frequency * QueuedHandlersLogCooldownSeconds));
-                    }
-                }
-                return enq > 0;
+                var logName = hubName;
+                if (hubKey != null && hubKey.IsStatic)
+                    logName += " (static hub)";
+                return EnqueueBatch(actions, logName);
             }
             catch (Exception ex)
             {
@@ -3151,6 +3182,9 @@ namespace MapPerfProbe
         {
             if (msBudget <= 0.0) return;
 
+            var start = Stopwatch.GetTimestamp();
+            var deadline = start + (long)(msBudget * SubModule.MsToTicks);
+            PumpDeadlineTicks = deadline;
             double budget = msBudget;
             int pumped = 0;
             var throttle = !SubModule.PausedSnapshot;
@@ -3158,30 +3192,37 @@ namespace MapPerfProbe
                 ? (SubModule.FastSnapshot ? 2.5 : 3.5)
                 : double.PositiveInfinity;
             var pumpedCap = throttle ? (SubModule.FastSnapshot ? 1 : 2) : int.MaxValue;
-            while (true)
+            try
             {
-                Action action = null;
-                lock (_lock)
+                while (true)
                 {
-                    if (_qHandlers.Count == 0)
+                    Action action = null;
+                    lock (_lock)
+                    {
+                        if (_qHandlers.Count == 0)
+                            break;
+                        action = _qHandlers.Dequeue();
+                    }
+
+                    var before = Stopwatch.GetTimestamp();
+                    try { action(); }
+                    catch (Exception ex) { MapPerfLog.Error("[slice] pumped action failed", ex); }
+                    var tookMs = (Stopwatch.GetTimestamp() - before) * SubModule.TicksToMs;
+                    if (SubModule.FastSnapshot && tookMs > 3.0)
+                        MapPerfLog.Warn($"[slice] long action {tookMs:F1} ms (fast)");
+                    pumped++;
+                    budget -= Math.Max(0.0, tookMs);
+
+                    if (budget <= 0.0) break;
+                    if (throttle && tookMs > overrunLimit)
                         break;
-                    action = _qHandlers.Dequeue();
+                    if (pumped >= pumpedCap)
+                        break;
                 }
-
-                var before = Stopwatch.GetTimestamp();
-                try { action(); }
-                catch (Exception ex) { MapPerfLog.Error("[slice] pumped action failed", ex); }
-                var tookMs = (Stopwatch.GetTimestamp() - before) * SubModule.TicksToMs;
-                if (SubModule.FastSnapshot && tookMs > 3.0)
-                    MapPerfLog.Warn($"[slice] long action {tookMs:F1} ms (fast)");
-                pumped++;
-                budget -= Math.Max(0.0, tookMs);
-
-                if (budget <= 0.0) break;
-                if (throttle && tookMs > overrunLimit)
-                    break;
-                if (pumped >= pumpedCap)
-                    break;
+            }
+            finally
+            {
+                PumpDeadlineTicks = 0;
             }
 
             int remaining;
@@ -3193,6 +3234,17 @@ namespace MapPerfProbe
                 MapPerfLog.Info($"[slice] pumped {pumped} (rem {remaining})");
                 Volatile.Write(ref _nextPumpLogTs, now + (long)(Stopwatch.Frequency * PumpLogCooldownSeconds));
             }
+        }
+
+        private static void MaybeLogBatchChildError(string name, Exception ex)
+        {
+            var now = Stopwatch.GetTimestamp();
+            if (now < Volatile.Read(ref _nextBatchChildErrorLogTs))
+                return;
+
+            MapPerfLog.Error($"[slice] {name} child failed", ex);
+            Volatile.Write(ref _nextBatchChildErrorLogTs,
+                now + (long)(Stopwatch.Frequency * BatchChildErrorCooldownSeconds));
         }
 
         private static void TryLogQueuePressure_NoLock(int count)
