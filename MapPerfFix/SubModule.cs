@@ -3320,7 +3320,11 @@ namespace MapPerfProbe
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static bool TryDeferHubInvoke(object target, MethodInfo mi, MethodBase bypassKey, Action onComplete)
+        private static bool TryDeferHubInvoke(
+            object target,
+            MethodInfo mi,
+            MethodBase bypassKey,
+            Action onComplete)
         {
             if (mi == null || mi.IsAbstract || mi.ContainsGenericParameters || mi.GetParameters().Length != 0)
                 return false;
