@@ -331,7 +331,7 @@ namespace MapPerfProbe
             ResetHourlyTickLatch();
         }
 
-        protected override void OnGameLoaded(Game game, object initializerObject)
+        public override void OnGameLoaded(Game game, object initializerObject)
         {
             base.OnGameLoaded(game, initializerObject);
             ResetHourlyTickLatch();
