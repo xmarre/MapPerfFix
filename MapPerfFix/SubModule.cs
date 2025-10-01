@@ -11,6 +11,8 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Runtime.CompilerServices;
 using System.Text;
+using TaleWorlds.CampaignSystem;
+using TaleWorlds.Core;
 using TaleWorlds.MountAndBlade;
 
 namespace MapPerfProbe
@@ -157,6 +159,7 @@ namespace MapPerfProbe
         private static int _childBackpressureSkips;
         private static readonly ConcurrentDictionary<MethodBase, int> _childBackpressureSkipsByMethod =
             new ConcurrentDictionary<MethodBase, int>();
+        private static long _lastHourlyTickHour = -1;
         internal static double TicksToMs => TicksToMsConst;
         internal static double MsToTicks => MsToTicksConst;
         private const double BytesPerKiB = 1024.0;
@@ -166,6 +169,11 @@ namespace MapPerfProbe
             Interlocked.Exchange(ref _childBacklogToken, 0);
             Interlocked.Exchange(ref _childBackpressureSkips, 0);
             _childBackpressureSkipsByMethod.Clear();
+        }
+
+        private static void ResetHourlyTickLatch()
+        {
+            Interlocked.Exchange(ref _lastHourlyTickHour, -1L);
         }
 
         private struct AllocWarnBudget
@@ -315,6 +323,18 @@ namespace MapPerfProbe
                 catch { /* best-effort restore */ }
                 _didPatch = false; // fail safe, keep game running
             }
+        }
+
+        protected override void OnGameStart(Game game, IGameStarter gameStarterObject)
+        {
+            base.OnGameStart(game, gameStarterObject);
+            ResetHourlyTickLatch();
+        }
+
+        protected override void OnGameLoaded(Game game, object initializerObject)
+        {
+            base.OnGameLoaded(game, initializerObject);
+            ResetHourlyTickLatch();
         }
 
         protected override void OnSubModuleUnloaded()
@@ -772,7 +792,28 @@ namespace MapPerfProbe
         public static bool OnHourlyTick_Prefix(object __instance, MethodBase __originalMethod)
         {
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
-            return !PeriodicSlicer.RedirectAny(__instance, __originalMethod, "OnHourlyTick");
+
+            long hourNow;
+            try
+            {
+                hourNow = (long)Math.Floor(CampaignTime.Now.ToHours);
+            }
+            catch
+            {
+                hourNow = long.MinValue;
+            }
+
+            if (hourNow != long.MinValue && Volatile.Read(ref _lastHourlyTickHour) == hourNow)
+                return false;
+
+            var handled = PeriodicSlicer.RedirectAny(__instance, __originalMethod, "OnHourlyTick");
+            if (!handled)
+                return true;
+
+            if (hourNow != long.MinValue)
+                Interlocked.Exchange(ref _lastHourlyTickHour, hourNow);
+
+            return false;
         }
 
         // Unified prefix for any periodic hub (instance or static).
@@ -781,6 +822,9 @@ namespace MapPerfProbe
             var name = __originalMethod?.Name;
             if (string.IsNullOrEmpty(name)) return true;
             if (!IsPeriodic(__originalMethod)) return true;
+            if (string.Equals(name, "HourlyTick", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "OnHourlyTick", StringComparison.OrdinalIgnoreCase))
+                return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
             return !PeriodicSlicer.RedirectAny(__instance, __originalMethod, name);
         }
@@ -3248,11 +3292,9 @@ namespace MapPerfProbe
             PumpDeadlineTicks = deadline;
             double budget = msBudget;
             int pumped = 0;
-            var throttle = !SubModule.PausedSnapshot;
-            var overrunLimit = throttle
-                ? (SubModule.FastSnapshot ? 2.5 : 3.5)
-                : double.PositiveInfinity;
-            var pumpedCap = throttle ? (SubModule.FastSnapshot ? 1 : 2) : int.MaxValue;
+            var throttle = true;
+            var overrunLimit = SubModule.PausedSnapshot ? 16.0 : (SubModule.FastSnapshot ? 2.5 : 3.5);
+            var pumpedCap = SubModule.PausedSnapshot ? int.MaxValue : (SubModule.FastSnapshot ? 1 : 2);
             long overshoot = 0;
             var pumpHeadroomTicks = (long)(2.0 * SubModule.MsToTicks);
             string exitReason = string.Empty;
