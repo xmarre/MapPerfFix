@@ -130,7 +130,13 @@ namespace MapPerfProbe
         private static Type _campaignType;
         private static PropertyInfo _campaignCurrentProp;
         private static PropertyInfo _campaignTimeControlProp;
+        private static Type _gsmType;
+        private static PropertyInfo _gsmCurrentProp;
+        private static PropertyInfo _gsmActiveStateProp;
         private static readonly double TicksToMsConst = 1000.0 / Stopwatch.Frequency;
+        // Per-frame cheap flags (avoid reflection in PeriodicSlicer)
+        private static volatile bool _snapFastOrPaused;
+        internal static bool FastOrPausedSnapshot => _snapFastOrPaused;
         internal static double TicksToMs => TicksToMsConst;
         private const double BytesPerKiB = 1024.0;
 
@@ -318,6 +324,8 @@ namespace MapPerfProbe
         {
             var paused = IsPaused();
             var onMap = IsOnMap();
+            if (!onMap)
+                PeriodicSlicer.ClearCachesIfIdle();
             var desired = paused ? GCLatencyMode.Interactive : GCLatencyMode.SustainedLowLatency;
             if (GCSettings.LatencyMode != desired)
             {
@@ -402,7 +410,14 @@ namespace MapPerfProbe
             }
 
             if (allocDelta > ForceFlushAllocBytes || wsDelta > ForceFlushWsBytes)
-                FlushSummary(true);
+            {
+                // Avoid huge string-building + aggregation on the UI thread while paused.
+                // Instead, schedule a near-term flush.
+                if (paused)
+                    _nextFlush = Math.Min(_nextFlush, 1.0);
+                else
+                    FlushSummary(true);
+            }
 
             _nextFlush -= dt;
             if (_frameSpikeCD > 0.0)
@@ -417,10 +432,13 @@ namespace MapPerfProbe
                     FlushSummary(force: false);
             }
 
+            // Cheap per-frame snapshot for slicer (no reflection in hot path)
+            _snapFastOrPaused = paused || IsFastTime();
+
             // Drain slices even while paused to avoid backlog cliffs
             if (onMap)
             {
-                var budget = paused ? 16.0 : (IsFastTime() ? 10.0 : 2.0);
+                var budget = paused ? 16.0 : (IsFastTime() ? 12.0 : 4.0);
                 PeriodicSlicer.Pump(msBudget: budget);
             }
         }
@@ -2255,13 +2273,29 @@ namespace MapPerfProbe
             return !IsPaused();
         }
 
+        private static void EnsureGsmRefs()
+        {
+            if (_gsmType == null)
+                _gsmType = Type.GetType("TaleWorlds.Core.GameStateManager, TaleWorlds.Core", throwOnError: false);
+            if (_gsmCurrentProp == null)
+                _gsmCurrentProp = _gsmType?.GetProperty("Current", BindingFlags.Public | BindingFlags.Static);
+            if (_gsmActiveStateProp == null)
+            {
+                var cur = _gsmCurrentProp?.GetValue(null);
+                if (cur != null)
+                    _gsmActiveStateProp = cur.GetType().GetProperty("ActiveState", BindingFlags.Public | BindingFlags.Instance);
+            }
+        }
+
         private static bool IsOnMap()
         {
             try
             {
-                var gsmType = Type.GetType("TaleWorlds.Core.GameStateManager, TaleWorlds.Core", throwOnError: false);
-                var current = gsmType?.GetProperty("Current", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
-                var active = current?.GetType().GetProperty("ActiveState", BindingFlags.Public | BindingFlags.Instance)?.GetValue(current);
+                EnsureGsmRefs();
+                var current = _gsmCurrentProp?.GetValue(null);
+                if (_gsmActiveStateProp == null && current != null)
+                    _gsmActiveStateProp = current.GetType().GetProperty("ActiveState", BindingFlags.Public | BindingFlags.Instance);
+                var active = _gsmActiveStateProp?.GetValue(current);
                 var name = active?.GetType().FullName ?? string.Empty;
                 return name.EndsWith(".MapState", StringComparison.OrdinalIgnoreCase)
                        || string.Equals(name, "MapState", StringComparison.OrdinalIgnoreCase);
@@ -2368,11 +2402,37 @@ namespace MapPerfProbe
             = new System.Collections.Concurrent.ConcurrentDictionary<MethodBase, int>();
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _recentHubs
             = new System.Collections.Concurrent.ConcurrentDictionary<string, long>(StringComparer.Ordinal);
+        private const int RecentHubSoftCap = 80_000;
+        private const int RecentHubHardCap = 100_000;
+        private const double RecentHubTtlSeconds = 300.0;
+        // Cache: does this hub actually have any discovered handlers?
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<MethodBase, bool> _hubHasHandlers
+            = new System.Collections.Concurrent.ConcurrentDictionary<MethodBase, bool>();
+        // When we last concluded "no handlers"; after this point, re-discover.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<MethodBase, long> _hubNoHandlersUntil
+            = new System.Collections.Concurrent.ConcurrentDictionary<MethodBase, long>();
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<HandlerKey, bool> _hubHasHandlersInst
+            = new System.Collections.Concurrent.ConcurrentDictionary<HandlerKey, bool>();
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<HandlerKey, long> _hubNoHandlersUntilInst
+            = new System.Collections.Concurrent.ConcurrentDictionary<HandlerKey, long>();
+        // Cache discovered handlers to avoid reflection+alloc per tick
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<HandlerKey, List<Action>> _handlerCache
+            = new System.Collections.Concurrent.ConcurrentDictionary<HandlerKey, List<Action>>();
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<HandlerKey, long> _handlerNextRefreshTs
+            = new System.Collections.Concurrent.ConcurrentDictionary<HandlerKey, long>();
         private static long _nextPumpLogTs;
+        private static long _nextQueuedHubLogTs;
+        private static long _nextQueuedHandlersLogTs;
         private static long _nextQueuePressureLogTs;
         private const double PumpLogCooldownSeconds = 0.5;
         private const double QueuePressureCooldownSeconds = 0.5;
         private const int QueuePressureThreshold = 15_000;
+        private const double QueuedHubLogCooldownSeconds = 1.0;
+        private const double QueuedHandlersLogCooldownSeconds = 0.5;
+        private const double HandlerCacheRefreshMs = 5000.0;
+        private const int HandlerCacheMax = 16384;
+        private const double HubEnqueueWindowMs = 4000.0;
+        private const double HubNoHandlersRetryMs = 5000.0;
 
         private static string HubKey(MethodBase mi, object inst = null)
         {
@@ -2434,7 +2494,7 @@ namespace MapPerfProbe
             {
                 unchecked
                 {
-                    var methodHash = Method != null ? Method.GetHashCode() : 0;
+                    var methodHash = Method != null ? RuntimeHelpers.GetHashCode(Method) : 0;
                     var targetHash = Target != null ? RuntimeHelpers.GetHashCode(Target) : 0;
                     return (methodHash * 397) ^ targetHash;
                 }
@@ -2461,6 +2521,39 @@ namespace MapPerfProbe
             }
 
             return deduped.Count == actions.Count ? actions : deduped;
+        }
+
+        private static List<Action> GetOrDiscoverHandlers(object dispatcher, MethodBase hub, string methodName)
+        {
+            var mi = hub as MethodInfo;
+            var key = new HandlerKey(mi, dispatcher);
+            var now = Stopwatch.GetTimestamp();
+            if (_handlerCache.TryGetValue(key, out var cached)
+                && _handlerNextRefreshTs.TryGetValue(key, out var next)
+                && now < next)
+            {
+                return cached;
+            }
+
+            var discovered = dispatcher != null
+                ? DiscoverSubscriberActions(dispatcher, hub, methodName)
+                : DiscoverSubscriberActions(hub?.DeclaringType, methodName);
+
+            var actions = DeduplicateHandlers(discovered) ?? new List<Action>(0);
+            _handlerCache[key] = actions;
+            _handlerNextRefreshTs[key] = now
+                                          + (long)(Stopwatch.Frequency * (HandlerCacheRefreshMs / 1000.0));
+            if (_handlerCache.Count > HandlerCacheMax)
+            {
+                foreach (var kv in _handlerNextRefreshTs
+                             .OrderBy(kvp => kvp.Value)
+                             .Take(Math.Max(1, _handlerCache.Count / 4)))
+                {
+                    _handlerCache.TryRemove(kv.Key, out _);
+                    _handlerNextRefreshTs.TryRemove(kv.Key, out _);
+                }
+            }
+            return actions;
         }
 
         public static bool RedirectDaily(object dispatcher)
@@ -2502,19 +2595,74 @@ namespace MapPerfProbe
             try
             {
                 if (dispatcher == null) return false;
-                var actions = DiscoverSubscriberActions(dispatcher, hub, methodName);
-                actions = DeduplicateHandlers(actions);
+                List<Action> actions;
+                var nowTs = Stopwatch.GetTimestamp();
+                var hubMethod = hub as MethodInfo;
+                var hasInstanceKey = hubMethod != null && dispatcher != null;
+                var handlerKey = hasInstanceKey ? new HandlerKey(hubMethod, dispatcher) : default;
+                long retryTs = 0L;
+                if (hub != null)
+                {
+                    retryTs = hasInstanceKey
+                        ? (_hubNoHandlersUntilInst.TryGetValue(handlerKey, out var untilTsInst) ? untilTsInst : 0L)
+                        : (_hubNoHandlersUntil.TryGetValue(hub, out var untilTs) ? untilTs : 0L);
+                }
+                var shouldSkip = false;
+                if (hub != null)
+                {
+                    shouldSkip = hasInstanceKey
+                        ? (_hubHasHandlersInst.TryGetValue(handlerKey, out var hasInst) && !hasInst && nowTs < retryTs)
+                        : (_hubHasHandlers.TryGetValue(hub, out var hasHandlers) && !hasHandlers && nowTs < retryTs);
+                }
+                if (shouldSkip)
+                {
+                    actions = new List<Action>(0);
+                }
+                else
+                {
+                    actions = GetOrDiscoverHandlers(dispatcher, hub, methodName);
+                    if (hub != null)
+                    {
+                        var found = actions.Count > 0;
+                        if (hasInstanceKey)
+                        {
+                            _hubHasHandlersInst[handlerKey] = found;
+                            if (!found)
+                            {
+                                _hubNoHandlersUntilInst[handlerKey] =
+                                    nowTs + (long)(Stopwatch.Frequency * (HubNoHandlersRetryMs / 1000.0));
+                            }
+                            else
+                            {
+                                _hubNoHandlersUntilInst.TryRemove(handlerKey, out _);
+                            }
+                        }
+                        else
+                        {
+                            _hubHasHandlers[hub] = found;
+                            if (!found)
+                            {
+                                _hubNoHandlersUntil[hub] =
+                                    nowTs + (long)(Stopwatch.Frequency * (HubNoHandlersRetryMs / 1000.0));
+                            }
+                            else
+                            {
+                                _hubNoHandlersUntil.TryRemove(hub, out _);
+                            }
+                        }
+                    }
+                }
                 var name = hub?.Name ?? methodName;
                 if (actions.Count == 0)
                 {
                     // Fallback: slice the hub itself (like RedirectStatic) so it never bursts
-                    if (hub is MethodInfo mi &&
-                        !mi.IsAbstract && !mi.ContainsGenericParameters &&
-                        mi.GetParameters().Length == 0)
+                    if (hubMethod != null &&
+                        !hubMethod.IsAbstract && !hubMethod.ContainsGenericParameters &&
+                        hubMethod.GetParameters().Length == 0)
                     {
-                        var key = HubKey(mi, dispatcher);
-                        if (!EnqueueOnce(key, 200.0)) return true; // recently queued
-                        var fastOrPaused = SubModule.IsFastOrPaused();
+                        var key = HubKey(hubMethod, dispatcher);
+                        if (!EnqueueOnce(key, HubEnqueueWindowMs)) return true; // recently queued
+                        var fastOrPaused = SubModule.FastOrPausedSnapshot;
 
                         void InvokeFallback()
                         {
@@ -2522,18 +2670,18 @@ namespace MapPerfProbe
                             EnterBypass(hub);
                             try
                             {
-                                mi.Invoke(dispatcher, null);
+                                hubMethod.Invoke(dispatcher, null);
                             }
                             catch (Exception ex)
                             {
-                                MapPerfLog.Error($"slice hub {mi.DeclaringType?.FullName}.{mi.Name} failed", ex);
+                                MapPerfLog.Error($"slice hub {hubMethod.DeclaringType?.FullName}.{hubMethod.Name} failed", ex);
                             }
                             finally
                             {
                                 ExitBypass(hub);
                                 var elapsed = Stopwatch.GetTimestamp() - start;
                                 var elapsedMs = elapsed * SubModule.TicksToMs;
-                                var stateFastOrPaused = SubModule.IsFastOrPaused();
+                                var stateFastOrPaused = SubModule.FastOrPausedSnapshot;
                                 lock (_pendingLock)
                                 {
                                     _pending.Remove(key);
@@ -2573,7 +2721,13 @@ namespace MapPerfProbe
                                 _qHubs.Enqueue(InvokeFallback);
                             }
                         }
-                        MapPerfLog.Info($"[slice] queued 1 {mi.Name} (hub fallback)");
+                        var now = Stopwatch.GetTimestamp();
+                        if (now >= Volatile.Read(ref _nextQueuedHubLogTs))
+                        {
+                            MapPerfLog.Info($"[slice] queued 1 {hubMethod.Name} (hub fallback)");
+                            Volatile.Write(ref _nextQueuedHubLogTs,
+                                now + (long)(Stopwatch.Frequency * QueuedHubLogCooldownSeconds));
+                        }
                         return true;
                     }
                     return false;
@@ -2598,9 +2752,15 @@ namespace MapPerfProbe
                 if (afterCount >= QueuePressureThreshold) TryLogQueuePressure_NoLock(afterCount);
                 if (enq > 0)
                 {
-                    var shown = Math.Min(enq, 5000);
-                    var suffix = enq > shown ? "+" : string.Empty;
-                    MapPerfLog.Info($"[slice] queued {shown}{suffix} {name} handlers");
+                    var now = Stopwatch.GetTimestamp();
+                    if (now >= Volatile.Read(ref _nextQueuedHandlersLogTs))
+                    {
+                        var shown = Math.Min(enq, 5000);
+                        var suffix = enq > shown ? "+" : string.Empty;
+                        MapPerfLog.Info($"[slice] queued {shown}{suffix} {name} handlers");
+                        Volatile.Write(ref _nextQueuedHandlersLogTs,
+                            now + (long)(Stopwatch.Frequency * QueuedHandlersLogCooldownSeconds));
+                    }
                 }
                 return enq > 0;
             }
@@ -2616,8 +2776,43 @@ namespace MapPerfProbe
             try
             {
                 if (hubType == null) return false;
-                var actions = DiscoverSubscriberActions(hubType, methodName);
-                actions = DeduplicateHandlers(actions);
+                var hubKey = (MethodBase)original
+                               ?? (MethodBase)hubType.GetMethod(methodName,
+                                   BindingFlags.Public | BindingFlags.NonPublic |
+                                   BindingFlags.Static | BindingFlags.Instance);
+                List<Action> actions;
+                if (hubKey != null && _hubHasHandlers.TryGetValue(hubKey, out var hasHandlers) && !hasHandlers)
+                {
+                    var nowTs = Stopwatch.GetTimestamp();
+                    if (_hubNoHandlersUntil.TryGetValue(hubKey, out var untilTs) && nowTs < untilTs)
+                    {
+                        actions = new List<Action>(0);
+                    }
+                    else
+                    {
+                        actions = GetOrDiscoverHandlers(null, hubKey, methodName);
+                        var found = actions.Count > 0;
+                        _hubHasHandlers[hubKey] = found;
+                        if (!found)
+                            _hubNoHandlersUntil[hubKey] = nowTs + (long)(Stopwatch.Frequency * (HubNoHandlersRetryMs / 1000.0));
+                        else
+                            _hubNoHandlersUntil.TryRemove(hubKey, out _);
+                    }
+                }
+                else
+                {
+                    actions = GetOrDiscoverHandlers(null, hubKey, methodName);
+                    if (hubKey != null)
+                    {
+                        var nowTs = Stopwatch.GetTimestamp();
+                        var found = actions.Count > 0;
+                        _hubHasHandlers[hubKey] = found;
+                        if (!found)
+                            _hubNoHandlersUntil[hubKey] = nowTs + (long)(Stopwatch.Frequency * (HubNoHandlersRetryMs / 1000.0));
+                        else
+                            _hubNoHandlersUntil.TryRemove(hubKey, out _);
+                    }
+                }
                 var key = $"{hubType.FullName}:{methodName}";
                 if (actions.Count == 0)
                 {
@@ -2631,11 +2826,11 @@ namespace MapPerfProbe
                         return false;
                     }
 
-                    if (!EnqueueOnce(key, 200.0))
+                    if (!EnqueueOnce(key, HubEnqueueWindowMs))
                         return true;
 
                     var pendingKey = HubKey(mi);
-                    var fastOrPaused = SubModule.IsFastOrPaused();
+                    var fastOrPaused = SubModule.FastOrPausedSnapshot;
 
                     void InvokeFallback()
                     {
@@ -2648,7 +2843,7 @@ namespace MapPerfProbe
                             ExitBypass(original);
                             var elapsed = Stopwatch.GetTimestamp() - start;
                             var elapsedMs = elapsed * SubModule.TicksToMs;
-                            var stateFastOrPaused = SubModule.IsFastOrPaused();
+                            var stateFastOrPaused = SubModule.FastOrPausedSnapshot;
                             lock (_pendingLock)
                             {
                                 _pending.Remove(pendingKey);
@@ -2685,11 +2880,17 @@ namespace MapPerfProbe
                         }
                         if (afterCount >= QueuePressureThreshold) TryLogQueuePressure_NoLock(afterCount);
                     }
-                    MapPerfLog.Info($"[slice] queued hub {hubType.FullName}.{methodName} (fallback)");
+                    var now = Stopwatch.GetTimestamp();
+                    if (now >= Volatile.Read(ref _nextQueuedHubLogTs))
+                    {
+                        MapPerfLog.Info($"[slice] queued hub {hubType.FullName}.{methodName} (fallback)");
+                        Volatile.Write(ref _nextQueuedHubLogTs,
+                            now + (long)(Stopwatch.Frequency * QueuedHubLogCooldownSeconds));
+                    }
                     return true;
                 }
 
-                if (!EnqueueOnce(key, 200.0))
+                if (!EnqueueOnce(key, HubEnqueueWindowMs))
                     return true;
 
                 int enq = 0;
@@ -2711,9 +2912,15 @@ namespace MapPerfProbe
                 if (after >= QueuePressureThreshold) TryLogQueuePressure_NoLock(after);
                 if (enq > 0)
                 {
-                    var shown = Math.Min(enq, 5000);
-                    var suffix = enq > shown ? "+" : string.Empty;
-                    MapPerfLog.Info($"[slice] queued {shown}{suffix} {methodName} handlers (static hub)");
+                    var now = Stopwatch.GetTimestamp();
+                    if (now >= Volatile.Read(ref _nextQueuedHandlersLogTs))
+                    {
+                        var shown = Math.Min(enq, 5000);
+                        var suffix = enq > shown ? "+" : string.Empty;
+                        MapPerfLog.Info($"[slice] queued {shown}{suffix} {methodName} handlers (static hub)");
+                        Volatile.Write(ref _nextQueuedHandlersLogTs,
+                            now + (long)(Stopwatch.Frequency * QueuedHandlersLogCooldownSeconds));
+                    }
                 }
                 return enq > 0;
             }
@@ -2724,13 +2931,29 @@ namespace MapPerfProbe
             }
         }
 
+        public static void ClearCachesIfIdle()
+        {
+            lock (_lock)
+            {
+                if (_qHandlers.Count != 0 || _qHubs.Count != 0)
+                    return;
+            }
+
+            _handlerCache.Clear();
+            _handlerNextRefreshTs.Clear();
+            _hubHasHandlersInst.Clear();
+            _hubNoHandlersUntilInst.Clear();
+            _hubHasHandlers.Clear();
+            _hubNoHandlersUntil.Clear();
+        }
+
         // Drain handlers always; drain hub fallbacks only when paused/fast-time.
         public static void Pump(double msBudget)
         {
             if (msBudget <= 0.0) return;
 
             // If we’ve just become paused/fast-time, materialize deferred hubs now.
-            if (SubModule.IsFastOrPaused())
+            if (SubModule.FastOrPausedSnapshot)
             {
                 lock (_pendingLock)
                 {
@@ -2748,9 +2971,9 @@ namespace MapPerfProbe
             }
             double budget = msBudget;
             int pumped = 0;
+            bool allowHubs = SubModule.FastOrPausedSnapshot;
             while (true)
             {
-                bool allowHubs = SubModule.IsFastOrPaused();
                 Action a = null;
                 lock (_lock)
                 {
@@ -2772,9 +2995,9 @@ namespace MapPerfProbe
                 var tookMs = (Stopwatch.GetTimestamp() - before) * SubModule.TicksToMs;
                 pumped++;
                 budget -= Math.Max(0.0, tookMs);
-                // Always respect budget; add extra per-action guard only while RUN
+                // Respect budget; during RUN bail early if one action is "too long"
                 if (budget <= 0.0) break;
-                if (!allowHubs && tookMs > 2.0) break;
+                if (!allowHubs && tookMs > 4.0) break;
             }
             int rem;
             lock (_lock)
@@ -2816,6 +3039,29 @@ namespace MapPerfProbe
                 {
                     if (now - kv.Value > windowTicks * 4)
                         _recentHubs.TryRemove(kv.Key, out _);
+                }
+            }
+
+            if (_recentHubs.Count > RecentHubSoftCap)
+            {
+                long ttlTicks = (long)(Stopwatch.Frequency * RecentHubTtlSeconds);
+                foreach (var kv in _recentHubs.ToArray())
+                {
+                    if (now - kv.Value > ttlTicks)
+                        _recentHubs.TryRemove(kv.Key, out _);
+                }
+            }
+
+            if (_recentHubs.Count > RecentHubHardCap)
+            {
+                var snapshot = _recentHubs.ToArray();
+                int excess = snapshot.Length - RecentHubSoftCap;
+                if (excess > 0)
+                {
+                    foreach (var kv in snapshot.OrderBy(kv => kv.Value).Take(excess))
+                    {
+                        _recentHubs.TryRemove(kv.Key, out _);
+                    }
                 }
             }
 
