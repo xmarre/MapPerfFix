@@ -93,7 +93,7 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
-    <!-- Compile-time only; do not copy MCM into your mod output -->
+    <!-- Compile-time only: lets MCM attributes/types resolve without bundling MCM -->
     <PackageReference Include="Bannerlord.MCM" Version="5.10.1" IncludeAssets="compile" />
   </ItemGroup>
   <ItemGroup>
