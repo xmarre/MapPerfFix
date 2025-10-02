@@ -1,3 +1,5 @@
+// Volatile.Read/Write refs are intentional; silence CS0420 for this file.
+#pragma warning disable CS0420
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -370,4 +372,5 @@ namespace MapPerfProbe
         }
     }
 }
+#pragma warning restore CS0420
 
