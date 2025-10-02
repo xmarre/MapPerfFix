@@ -36,7 +36,7 @@ namespace MapPerfProbe
         internal static bool EnableMapThrottle => Get(s => s.EnableMapThrottle, true);
         internal static bool ThrottleOnlyInFastTime => Get(s => s.ThrottleOnlyInFastTime, true);
         internal static bool DesyncSimWhileThrottling => Get(s => s.DesyncSimWhileThrottling, true);
-        internal static int SimTickEveryNSkipped => Get(s => s.SimTickEveryNSkipped, 2);
+        internal static int SimTickEveryNSkipped => Get(s => s.SimTickEveryNSkipped, 8);
         internal static int MaxDesyncMs => Get(s => s.MaxDesyncMs, 1000);
         internal static int DesyncLowWatermarkMs => Get(s => s.DesyncLowWatermarkMs, 400);
         internal static ThrottlePreset Preset => Get(s => s.Preset, ThrottlePreset.Balanced);
@@ -58,8 +58,14 @@ namespace MapPerfProbe
         internal static double PumpBudgetRunMs => 3.0;
         internal static double PumpBudgetFastMs => 8.0;
         internal static double PumpBudgetRunBoostMs => 4.0;
-        internal static double PumpBudgetFastBoostMs => 12.0;
-        internal static int PumpBacklogBoostThreshold => 10_000;
+        internal static double PumpBudgetFastBoostMs => 24.0;
+        internal static int PumpBacklogBoostThreshold => 1_000;
+        internal static double PumpBudgetRunCapMs => 12.0;
+        internal static double PumpBudgetFastCapMs => 18.0;
+        internal static double PumpTailMinRunMs => 4.0;
+        internal static double PumpTailMinFastMs => 6.0;
+        internal static double PumpPauseTrickleMapMs => 6.0;
+        internal static double PumpPauseTrickleMenuMs => 2.0;
         internal static double MapScreenProbeDtThresholdMs => 12.0;
         internal static double MapHotDurationMsThreshold => 1.0;
         internal static long MapHotAllocThresholdBytes => 128 * 1024;
