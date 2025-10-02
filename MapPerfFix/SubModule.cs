@@ -118,11 +118,19 @@ namespace MapPerfProbe
         private const int SlowLogPruneLimit = 2_048;
         private const double SlowLogPruneIntervalSeconds = 30.0;
         private const double SlowLogRetainSeconds = 30.0;
+        private static double _drainBoostUntilSec;
         private static Type _campaignBehaviorManagerType;
         private static PropertyInfo _campaignBehaviorManagerProp;
         private static PropertyInfo _campaignBehaviorsProp;
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static double NowSec() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void BoostDrain(double seconds = 3.0)
+        {
+            var dur = Math.Max(0.0, seconds);
+            var until = NowSec() + dur;
+            Volatile.Write(ref _drainBoostUntilSec, until);
+        }
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool ShouldLogSlow(string key, double windowSec = 5.0)
         {
@@ -208,6 +216,12 @@ namespace MapPerfProbe
         private static double PumpBudgetRunBoostMs => MapPerfConfig.PumpBudgetRunBoostMs;
         private static double PumpBudgetFastBoostMs => MapPerfConfig.PumpBudgetFastBoostMs;
         internal static int PumpBacklogBoostThreshold => MapPerfConfig.PumpBacklogBoostThreshold;
+        private static double PumpBudgetRunCapMs => MapPerfConfig.PumpBudgetRunCapMs;
+        private static double PumpBudgetFastCapMs => MapPerfConfig.PumpBudgetFastCapMs;
+        private static double PumpTailMinRunMs => MapPerfConfig.PumpTailMinRunMs;
+        private static double PumpTailMinFastMs => MapPerfConfig.PumpTailMinFastMs;
+        private static double PumpPauseTrickleMapMs => MapPerfConfig.PumpPauseTrickleMapMs;
+        private static double PumpPauseTrickleMenuMs => MapPerfConfig.PumpPauseTrickleMenuMs;
         private const int ChildInlineAllowEveryN = 120;
         private const int ChildInlineAllowanceMin = 8;
         private const int ChildInlineAllowanceHalfThresholdPct = 95;
@@ -465,12 +479,14 @@ namespace MapPerfProbe
         protected override void OnBeforeInitialModuleScreenSetAsRoot()
         {
             base.OnBeforeInitialModuleScreenSetAsRoot();
+            BoostDrain(3.0);
             ClearRunGates();
         }
 
         public override void OnGameLoaded(Game game, object initializerObject)
         {
             base.OnGameLoaded(game, initializerObject);
+            BoostDrain(3.0);
             ClearRunGates();
             PeriodicSlicer.ResetHourlyGates();
         }
@@ -478,6 +494,7 @@ namespace MapPerfProbe
         public override void OnGameEnd(Game game)
         {
             base.OnGameEnd(game);
+            BoostDrain(3.0);
             ClearRunGates();
             PeriodicSlicer.ResetHourlyGates();
         }
@@ -522,6 +539,7 @@ namespace MapPerfProbe
 
         private static void HandleFrameModeTransition(FrameMode nextMode)
         {
+            var prevMode = _lastFrameMode;
             _lastFrameMode = nextMode;
             Stats.Clear();
             RootAgg.Clear();
@@ -535,6 +553,11 @@ namespace MapPerfProbe
             _traceMem = false;
             _mapHotGate = false;
             _uiContextDepth = 0;
+            if ((prevMode == FrameMode.Fast && nextMode != FrameMode.Fast) ||
+                nextMode == FrameMode.Paused || prevMode == FrameMode.Paused)
+            {
+                BoostDrain();
+            }
         }
 
         private static void TryHandleDebugToggle()
@@ -901,17 +924,62 @@ namespace MapPerfProbe
                         FlushSummary(force: false);
                 }
 
-                // Drain slices only while unpaused to avoid large pause pumps.
+                // Drain queue
                 PeriodicSlicer.GetQueueStats(out var queueLength, out _, out _);
-                var pumpMs = 0.0;
+
+                double pumpMs = 0.0;
+                var boostUntil = Volatile.Read(ref _drainBoostUntilSec);
+
+                // end boost early if nothing left
+                if (queueLength == 0 && boostUntil > 0.0)
+                {
+                    Volatile.Write(ref _drainBoostUntilSec, 0.0);
+                    boostUntil = 0.0;
+                }
+
+                if (overBudget && boostUntil > 0.0)
+                {
+                    Volatile.Write(ref _drainBoostUntilSec, 0.0);
+                    boostUntil = 0.0;
+                }
+
                 if (!paused)
                 {
-                    pumpMs = fast ? PumpBudgetFastMs : PumpBudgetRunMs;
+                    var baseBudgetMs = fast ? PumpBudgetFastMs : PumpBudgetRunMs;
+
+                    // short burst after transitions
+                    if (boostUntil > 0.0 && NowSec() < boostUntil)
+                        baseBudgetMs = Math.Max(baseBudgetMs, 40.0);
+
+                    pumpMs = baseBudgetMs;
+
+                    // soft boost below hard threshold – clears backlog while staying subtle
+                    if (queueLength > 0 && queueLength < PumpBacklogBoostThreshold)
+                        pumpMs += Math.Min(8.0, queueLength * 0.002);
+
+                    // hard boost when backlog is large
                     if (queueLength >= PumpBacklogBoostThreshold)
                         pumpMs += fast ? PumpBudgetFastBoostMs : PumpBudgetRunBoostMs;
+
+                    // if frame was over budget, be conservative
                     if (overBudget)
                         pumpMs = Math.Max(0.5, pumpMs * 0.25);
                 }
+                else
+                {
+                    // tiny trickle during pause/menus → no minute-long trickle afterwards
+                    if (queueLength >= 1 || (boostUntil > 0.0 && NowSec() < boostUntil))
+                    {
+                        var trickle = onMap ? Math.Min(PumpPauseTrickleMapMs, PumpBudgetRunMs) : PumpPauseTrickleMenuMs;
+                        pumpMs = Math.Max(0.0, trickle);
+                    }
+                }
+
+                if (!overBudget && queueLength > 0 && queueLength <= 50)
+                    pumpMs = Math.Max(pumpMs, fast ? PumpTailMinFastMs : PumpTailMinRunMs);
+
+                pumpMs = Math.Min(pumpMs, fast ? PumpBudgetFastCapMs : PumpBudgetRunCapMs);
+
                 if (pumpMs > 0.0)
                     PeriodicSlicer.Pump(pumpMs);
             }
@@ -1307,12 +1375,8 @@ namespace MapPerfProbe
                 var any = false;
 
                 // Backpressure-aware per-hub enqueue cap
-                int cap = int.MaxValue;
                 var nearFull = PeriodicSlicer.IsQueueNearFull();
-                if (FastSnapshot)
-                    cap = nearFull ? 1 : 4;         // strict in fast-time
-                else if (nearFull)
-                    cap = 2;                        // gentle trickle in normal time
+                var cap = nearFull ? 1 : (FastSnapshot ? 2 : 3);
                 if (cap < 1) cap = 1;
                 int enq = 0;
 
@@ -1356,7 +1420,7 @@ namespace MapPerfProbe
 
                 for (var offset = 0; offset < count; offset++)
                 {
-                    if (cap != int.MaxValue && enq >= cap) break;
+                    if (enq >= cap) break;
 
                     var idx = (start + offset) % count;
                     var beh = behaviors[idx];
@@ -1384,8 +1448,30 @@ namespace MapPerfProbe
                     var behKey = behType.FullName ?? behName;
 
                     // Use the child MethodInfo as the queue key to avoid coalescing on the hub.
+                    var idxCaptured = idxGate;
                     var ok = PeriodicSlicer.EnqueueActionWithBypass(mi, () =>
                     {
+                        if (idxCaptured != long.MinValue)
+                        {
+                            long idxCur;
+                            try
+                            {
+                                if (isWeekly)
+                                    idxCur = (long)Math.Floor(CampaignTime.Now.ToDays / 7.0);
+                                else if (isDaily)
+                                    idxCur = (long)Math.Floor(CampaignTime.Now.ToDays);
+                                else
+                                    idxCur = (long)Math.Floor(CampaignTime.Now.ToHours);
+                            }
+                            catch
+                            {
+                                idxCur = idxCaptured;
+                            }
+
+                            if (idxCur != idxCaptured)
+                                return;
+                        }
+
                         var sw = Stopwatch.StartNew();
                         try { mi.Invoke(beh, null); }
                         catch (Exception ex)
