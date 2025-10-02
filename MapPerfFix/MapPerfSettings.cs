@@ -1,5 +1,4 @@
 using System;
-using System.Linq;
 using MCM.Abstractions.Attributes;
 using MCM.Abstractions.Attributes.v2;
 using MCM.Abstractions.Base.Global;
@@ -33,7 +32,7 @@ namespace MapPerfProbe
         [SettingPropertyDropdown("Preset", Order = 2)]
         public Dropdown<ThrottlePreset> PresetOption { get; set; } =
             new Dropdown<ThrottlePreset>(
-                Enum.GetValues(typeof(ThrottlePreset)).Cast<ThrottlePreset>().ToArray(),
+                (ThrottlePreset[])Enum.GetValues(typeof(ThrottlePreset)),
                 (int)ThrottlePreset.Balanced
             );
 
