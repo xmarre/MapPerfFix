@@ -145,6 +145,9 @@ namespace MapPerfProbe
         // Per-frame cheap flags (avoid reflection in PeriodicSlicer)
         private static volatile bool _snapPaused;
         private static volatile bool _snapFast;
+        private static bool _lastEnabled;
+        private static int _simSkipToken;
+        private static int _lastSimEveryN;
         internal static bool PausedSnapshot => _snapPaused;
         internal static bool FastSnapshot => _snapFast;
         internal static bool FastOrPausedSnapshot => _snapPaused || _snapFast;
@@ -234,6 +237,15 @@ namespace MapPerfProbe
         private static double _nextFlush = 0.0;
         private static long _lastAlloc = GC.GetTotalMemory(false);
         private static long _lastWs = GetWS();
+        private static double _lastFrameMsSnap;
+        private static double _desyncDebtMs;
+        private static int _frameSeq;
+        private static int _frameSeqStamped;
+        private static int _debtSeqApplied;
+        private static int _forcedCatchupSeq;
+        private static double _forcedCatchupDebtSnap;
+        private static double _nextDebtLog;
+        private static double _forcedCatchupCooldown;
         private static double _frameSpikeCD = 0.0;
         private static double _memSpikeCD = 0.0;
 
@@ -254,6 +266,11 @@ namespace MapPerfProbe
 
             try { _ = MapPerfSettings.Instance; }
             catch { /* ignore if MCM not present */ }
+
+            _lastEnabled = MapPerfConfig.Enabled;
+            _lastSimEveryN = MapPerfConfig.SimTickEveryNSkipped;
+            if (!_lastEnabled)
+                DisableRuntime();
 
             MsgFilter.RefreshFamilyMaskFromConfig();
 
@@ -286,8 +303,11 @@ namespace MapPerfProbe
 
                 // GC latency tuning – reduce full-blocking pauses during map play
                 _prevGcMode = GCSettings.LatencyMode;
-                try { GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency; }
-                catch { /* best-effort on Mono/older runtimes */ }
+                if (_lastEnabled)
+                {
+                    try { GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency; }
+                    catch { /* best-effort on Mono/older runtimes */ }
+                }
 
                 // IMPORTANT: throttle patch must be applied before broad instrumentation,
                 // so its bool-prefix can skip the original when needed.
@@ -296,6 +316,7 @@ namespace MapPerfProbe
                 // High-level map/UI hooks (already working)
                 SafePatch("TryPatchType(MapState)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.GameState.MapState", new[] { "OnTick", "OnMapModeTick", "OnFrameTick" }));
                 SafePatch("TryPatchType(MapState2)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.MapState", new[] { "OnTick", "OnMapModeTick", "OnFrameTick" }));
+                SafePatch("Desync MapState", () => PatchDesyncMapState(harmony));
                 SafePatch("TryPatchType(CampaignEventDispatcher)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.CampaignEventDispatcher", new[] { "OnTick", "DailyTick", "HourlyTick" }));
                 SafePatch("Slice Daily/Hourly",
                     () =>
@@ -463,168 +484,357 @@ namespace MapPerfProbe
             }
         }
 
-        protected override void OnApplicationTick(float dt)
+        private static void DisableRuntime()
         {
-            var paused = IsPaused();
-            var fast = IsFastTime();
-            MsgFilter.RefreshFamilyMaskFromConfig();
-            TryHandleDebugToggle();
-            if (!_debugOverride)
+            // Reset GC mode and all per-frame gates
+            try { GCSettings.LatencyMode = _prevGcMode; }
+            catch { /* best-effort */ }
+            _desyncDebtMs = 0.0;
+            WriteLastFrameMsSnap(0.0);
+            Interlocked.Exchange(ref _frameSeqStamped, 0);
+            Interlocked.Exchange(ref _frameSeq, 0);
+            Interlocked.Exchange(ref _debtSeqApplied, 0);
+            Interlocked.Exchange(ref _forcedCatchupSeq, 0);
+            _forcedCatchupDebtSnap = 0.0;
+            _nextDebtLog = 0.0;
+            _forcedCatchupCooldown = 0.0;
+            _mapScreenSkipFrames = 0;
+            _mapScreenThrottleActive = false;
+            _skipMapOnFrameTick = false;
+            _mapScreenFastTime = false;
+            _mapScreenFastTimeValid = false;
+            _mapHotGate = false;
+            _snapPaused = false;
+            _snapFast = false;
+            Interlocked.Exchange(ref _simSkipToken, 0);
+        }
+
+        private static void EnableRuntime()
+        {
+            // Restore preferred GC mode when active
+            try { GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency; }
+            catch { /* best-effort */ }
+            _lastSimEveryN = MapPerfConfig.SimTickEveryNSkipped;
+            Interlocked.Exchange(ref _simSkipToken, 0);
+            _desyncDebtMs = 0.0;
+            WriteLastFrameMsSnap(0.0);
+            Interlocked.Exchange(ref _frameSeq, 0);
+            Interlocked.Exchange(ref _frameSeqStamped, 0);
+            Interlocked.Exchange(ref _debtSeqApplied, 0);
+            Interlocked.Exchange(ref _forcedCatchupSeq, 0);
+            _forcedCatchupDebtSnap = 0.0;
+            _nextDebtLog = 0.0;
+            _forcedCatchupCooldown = 0.0;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void StampFrameSequence()
+        {
+            if (Interlocked.CompareExchange(ref _frameSeqStamped, 1, 0) == 0)
             {
-                MapPerfLog.DebugEnabled = MapPerfConfig.DebugLogging;
-            }
-            else if (MapPerfLog.DebugEnabled == MapPerfConfig.DebugLogging)
-            {
-                _debugOverride = false;
-            }
-            if (MapPerfLog.DebugEnabled)
-            {
-                _nextFilterLog -= dt;
-                if (_nextFilterLog <= 0.0)
+                var seq = Interlocked.Increment(ref _frameSeq);
+                if (seq <= 0 || seq > 1_000_000_000)
                 {
-                    _nextFilterLog = 10.0;
-                    var blocked = Volatile.Read(ref MsgFilter.FilterCount);
-                    MapPerfLog.Info($"[filter] blocked {blocked} messages total");
+                    Interlocked.Exchange(ref _frameSeq, 1);
                 }
             }
-            else
-            {
-                _nextFilterLog = 10.0;
-            }
-            var nextMode = paused ? FrameMode.Paused : (fast ? FrameMode.Fast : FrameMode.Run);
-            if (nextMode != _lastFrameMode)
-                HandleFrameModeTransition(nextMode);
-            _snapPaused = paused;
-            _snapFast = fast;
-            var onMap = IsOnMap();
-            if (onMap != _wasOnMap)
-            {
-                _wasOnMap = onMap;
-                if (onMap)
-                    Interlocked.Exchange(ref MsgFilter.FilterCount, 0);
-            }
-            var frameTag = paused ? "[PAUSED]" : (fast ? "[RUN-FAST]" : "[RUN]");
-            if (!onMap)
-                PeriodicSlicer.ClearCachesIfIdle();
-            var desired = paused ? GCLatencyMode.Interactive : GCLatencyMode.SustainedLowLatency;
-            if (GCSettings.LatencyMode != desired)
-            {
-                try { GCSettings.LatencyMode = desired; }
-                catch { /* best-effort */ }
-            }
-            var nowTs = Stopwatch.GetTimestamp();
-            double frameMs = (nowTs - _lastFrameTS) * TicksToMs;
-            _lastFrameTS = nowTs;
-            if (frameMs <= 0.0) frameMs = dt * 1000.0;
+        }
 
-            var overBudget = false;
-            if (onMap && !paused)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static double ReadLastFrameMsSnap() => Interlocked.CompareExchange(ref _lastFrameMsSnap, 0.0, 0.0);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void WriteLastFrameMsSnap(double value) => Interlocked.Exchange(ref _lastFrameMsSnap, value);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int ComputeEffectiveSkipCadence(double debt, int maxDebtMs)
+        {
+            var n = MapPerfConfig.SimTickEveryNSkipped;
+            if (n < 0) n = 0;
+            var wm = Math.Max(0, Math.Min(MapPerfConfig.DesyncLowWatermarkMs, maxDebtMs));
+            if (debt >= wm && n > 1)
+                return 2;
+            return n;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool ShouldSkipSimulationNow()
+        {
+            if (!MapPerfConfig.Enabled)
+                return false;
+            if (!MapPerfConfig.EnableMapThrottle || !MapPerfConfig.DesyncSimWhileThrottling)
+                return false;
+            if (!FastSnapshot || PausedSnapshot)
+                return false;
+            if (!(_mapScreenThrottleActive || _mapScreenSkipFrames > 0
+                  || Volatile.Read(ref _overBudgetStreak) >= HotEnableStreak))
+                return false;
+
+            var maxDebtMs = MapPerfConfig.MaxDesyncMs;
+            if (maxDebtMs <= 0)
+                return false;
+
+            var debt = _desyncDebtMs;
+            var frameSeq = Volatile.Read(ref _frameSeq);
+            if (debt >= maxDebtMs)
             {
-                if (_frameBudgetEmaMs <= 0.0)
+                Volatile.Write(ref _forcedCatchupSeq, frameSeq);
+                _forcedCatchupDebtSnap = debt;
+                return false;
+            }
+
+            var n = ComputeEffectiveSkipCadence(debt, maxDebtMs);
+            if (n == 0)
+                return true;
+
+            var token = Interlocked.Increment(ref _simSkipToken);
+            if (token <= 0 || token > 1_000_000_000)
+            {
+                Interlocked.Exchange(ref _simSkipToken, 0);
+                token = 0;
+            }
+            return (token % n) != 0;
+        }
+
+        protected override void OnApplicationTick(float dt)
+        {
+            // start-of-frame sequence stamp
+            StampFrameSequence();
+
+            try
+            {
+                if (_forcedCatchupCooldown > 0.0)
+                    _forcedCatchupCooldown = Math.Max(0.0, _forcedCatchupCooldown - dt);
+
+                var enabledNow = MapPerfConfig.Enabled;
+                if (enabledNow != _lastEnabled)
                 {
-                    _frameBudgetEmaMs = frameMs;
+                    if (enabledNow)
+                        EnableRuntime();
+                    else
+                        DisableRuntime();
+                    _lastEnabled = enabledNow;
+                }
+
+                if (!enabledNow)
+                    return;
+
+                var paused = IsPaused();
+                var fast = IsFastTime();
+                MsgFilter.RefreshFamilyMaskFromConfig();
+                TryHandleDebugToggle();
+                if (!_debugOverride)
+                {
+                    MapPerfLog.DebugEnabled = MapPerfConfig.DebugLogging;
+                }
+                else if (MapPerfLog.DebugEnabled == MapPerfConfig.DebugLogging)
+                {
+                    _debugOverride = false;
+                }
+                if (MapPerfLog.DebugEnabled)
+                {
+                    _nextFilterLog -= dt;
+                    if (_nextFilterLog <= 0.0)
+                    {
+                        _nextFilterLog = 10.0;
+                        var blocked = Volatile.Read(ref MsgFilter.FilterCount);
+                        MapPerfLog.Info($"[filter] blocked {blocked} messages total");
+                    }
                 }
                 else
                 {
-                    var candidate = Math.Min(frameMs, _frameBudgetEmaMs * 1.5);
-                    _frameBudgetEmaMs += (candidate - _frameBudgetEmaMs) * BudgetAlpha;
+                    _nextFilterLog = 10.0;
                 }
 
-                var snapped = SnapToVsyncIfClose(_frameBudgetEmaMs);
-                var clamped = snapped;
-                if (clamped < BudgetMinMs) clamped = BudgetMinMs;
-                else if (clamped > BudgetMaxMs) clamped = BudgetMaxMs;
-                _frameBudgetMs = clamped;
-
-                overBudget = frameMs > (_frameBudgetMs * BudgetHeadroom);
-                if (overBudget)
+                if (MapPerfLog.DebugEnabled && MapPerfConfig.EnableMapThrottle && MapPerfConfig.DesyncSimWhileThrottling)
                 {
-                    var v = Interlocked.Increment(ref _overBudgetStreak);
-                    if (v > OverBudgetStreakCap) Interlocked.Exchange(ref _overBudgetStreak, OverBudgetStreakCap);
+                    _nextDebtLog -= dt;
+                    if (_nextDebtLog <= 0.0)
+                    {
+                        _nextDebtLog = 5.0;
+                        var maxDebt = MapPerfConfig.MaxDesyncMs;
+                        if (maxDebt > 0)
+                        {
+                            var debt = Math.Max(0.0, _desyncDebtMs);
+                            var cadence = ComputeEffectiveSkipCadence(debt, maxDebt);
+                            string cadenceLabel;
+                            if (cadence <= 0)
+                                cadenceLabel = "skip-only";
+                            else if (cadence == 1)
+                                cadenceLabel = "every frame";
+                            else
+                                cadenceLabel = $"1 per {cadence}";
+                            var forcedActive = _forcedCatchupCooldown > 0.0;
+                            var forcedSuffix = forcedActive ? ", forced catch-up active" : string.Empty;
+                            MapPerfLog.Info($"[desync] debt {debt:F1} ms (cadence {cadenceLabel}, max {maxDebt} ms{forcedSuffix})");
+                        }
+                        else
+                        {
+                            MapPerfLog.Info("[desync] debt tracking disabled (max=0)");
+                        }
+                    }
+                }
+                else
+                {
+                    _nextDebtLog = 5.0;
+                }
+                var nextMode = paused ? FrameMode.Paused : (fast ? FrameMode.Fast : FrameMode.Run);
+                if (nextMode != _lastFrameMode)
+                    HandleFrameModeTransition(nextMode);
+                _snapPaused = paused;
+                _snapFast = fast;
+
+                if (!_mapScreenThrottleActive && _mapScreenSkipFrames == 0)
+                {
+                    Interlocked.Exchange(ref _simSkipToken, 0);
+                    _desyncDebtMs = 0.0;
+                }
+
+                var simEveryN = MapPerfConfig.SimTickEveryNSkipped;
+                if (simEveryN != _lastSimEveryN)
+                {
+                    _lastSimEveryN = simEveryN;
+                    Interlocked.Exchange(ref _simSkipToken, 0);
+                }
+
+                if (!MapPerfConfig.EnableMapThrottle || !MapPerfConfig.DesyncSimWhileThrottling)
+                    _desyncDebtMs = 0.0;
+
+                var onMap = IsOnMap();
+                if (onMap != _wasOnMap)
+                {
+                    _wasOnMap = onMap;
+                    if (onMap)
+                        Interlocked.Exchange(ref MsgFilter.FilterCount, 0);
+                }
+                var frameTag = paused ? "[PAUSED]" : (fast ? "[RUN-FAST]" : "[RUN]");
+                if (!onMap)
+                    PeriodicSlicer.ClearCachesIfIdle();
+                var desired = paused ? GCLatencyMode.Interactive : GCLatencyMode.SustainedLowLatency;
+                if (GCSettings.LatencyMode != desired)
+                {
+                    try { GCSettings.LatencyMode = desired; }
+                    catch { /* best-effort */ }
+                }
+                var nowTs = Stopwatch.GetTimestamp();
+                double frameMs = (nowTs - _lastFrameTS) * TicksToMs;
+                _lastFrameTS = nowTs;
+                if (frameMs <= 0.0) frameMs = dt * 1000.0;
+                WriteLastFrameMsSnap(frameMs);
+
+                var overBudget = false;
+                if (onMap && !paused)
+                {
+                    if (_frameBudgetEmaMs <= 0.0)
+                    {
+                        _frameBudgetEmaMs = frameMs;
+                    }
+                    else
+                    {
+                        var candidate = Math.Min(frameMs, _frameBudgetEmaMs * 1.5);
+                        _frameBudgetEmaMs += (candidate - _frameBudgetEmaMs) * BudgetAlpha;
+                    }
+
+                    var snapped = SnapToVsyncIfClose(_frameBudgetEmaMs);
+                    var clamped = snapped;
+                    if (clamped < BudgetMinMs) clamped = BudgetMinMs;
+                    else if (clamped > BudgetMaxMs) clamped = BudgetMaxMs;
+                    _frameBudgetMs = clamped;
+
+                    overBudget = frameMs > (_frameBudgetMs * BudgetHeadroom);
+                    if (overBudget)
+                    {
+                        var v = Interlocked.Increment(ref _overBudgetStreak);
+                        if (v > OverBudgetStreakCap) Interlocked.Exchange(ref _overBudgetStreak, OverBudgetStreakCap);
+                    }
+                    else
+                    {
+                        Interlocked.Exchange(ref _overBudgetStreak, 0);
+                    }
                 }
                 else
                 {
                     Interlocked.Exchange(ref _overBudgetStreak, 0);
                 }
-            }
-            else
-            {
-                Interlocked.Exchange(ref _overBudgetStreak, 0);
-            }
-            var spikeLimit = paused ? SpikePausedMs : SpikeRunMs;
-            if (onMap && frameMs > spikeLimit && _frameSpikeCD <= 0.0)
-            {
-                MapPerfLog.Warn($"FRAME spike {frameMs:F1} ms {frameTag}");
-                if (frameMs > FlushOnHugeFrameMs) FlushSummary(true);
-                _frameSpikeCD = 1.0;
-            }
-
-            for (int g = 0; g < 3; g++)
-            {
-                int c = GC.CollectionCount(g);
-                if (c != _gcLast[g])
+                var spikeLimit = paused ? SpikePausedMs : SpikeRunMs;
+                if (onMap && frameMs > spikeLimit && _frameSpikeCD <= 0.0)
                 {
-                    _gcAgg[g] += c - _gcLast[g];
-                    _gcLast[g] = c;
+                    MapPerfLog.Warn($"FRAME spike {frameMs:F1} ms {frameTag}");
+                    if (frameMs > FlushOnHugeFrameMs) FlushSummary(true);
+                    _frameSpikeCD = 1.0;
                 }
+
+                for (int g = 0; g < 3; g++)
+                {
+                    int c = GC.CollectionCount(g);
+                    if (c != _gcLast[g])
+                    {
+                        _gcAgg[g] += c - _gcLast[g];
+                        _gcLast[g] = c;
+                    }
+                }
+
+                var curAlloc = GC.GetTotalMemory(false);
+                var allocDelta = curAlloc - _lastAlloc;
+                _lastAlloc = curAlloc;
+
+                var ws = GetWS();
+                var wsDelta = ws - _lastWs;
+                _lastWs = ws;
+
+                if (onMap && allocDelta > AllocSpikeBytes && _memSpikeCD <= 0.0)
+                {
+                    MapPerfLog.Warn($"ALLOC spike +{allocDelta / 1_000_000.0:F1} MB");
+                    _memSpikeCD = 5.0;
+                }
+
+                if (onMap && wsDelta > WsSpikeBytes && _memSpikeCD <= 0.0)
+                {
+                    MapPerfLog.Warn($"WS spike +{wsDelta / 1_000_000.0:F1} MB");
+                    _memSpikeCD = 5.0;
+                }
+
+                if (allocDelta > ForceFlushAllocBytes || wsDelta > ForceFlushWsBytes)
+                {
+                    // Avoid huge string-building + aggregation on the UI thread while paused.
+                    // Instead, schedule a near-term flush.
+                    if (paused)
+                        _nextFlush = Math.Min(_nextFlush, 1.0);
+                    else
+                        FlushSummary(true);
+                }
+
+                _nextFlush -= dt;
+                if (_frameSpikeCD > 0.0)
+                    _frameSpikeCD = Math.Max(0.0, _frameSpikeCD - dt);
+                if (_memSpikeCD > 0.0)
+                    _memSpikeCD = Math.Max(0.0, _memSpikeCD - dt);
+                if (_nextFlush <= 0.0)
+                {
+                    // slower cadence while running; avoid summary flush during live play but fail-safe every ~30s
+                    _nextFlush = paused ? 5.0 : 30.0;
+                    if (onMap && (paused || allocDelta > 0 || wsDelta > 0))
+                        FlushSummary(force: false);
+                }
+
+                // Drain slices only while unpaused to avoid large pause pumps.
+                PeriodicSlicer.GetQueueStats(out var queueLength, out _, out _);
+                var pumpMs = 0.0;
+                if (!paused)
+                {
+                    pumpMs = fast ? PumpBudgetFastMs : PumpBudgetRunMs;
+                    if (queueLength >= PumpBacklogBoostThreshold)
+                        pumpMs += fast ? PumpBudgetFastBoostMs : PumpBudgetRunBoostMs;
+                    if (overBudget)
+                        pumpMs = Math.Max(0.5, pumpMs * 0.25);
+                }
+                if (pumpMs > 0.0)
+                    PeriodicSlicer.Pump(pumpMs);
             }
-
-            var curAlloc = GC.GetTotalMemory(false);
-            var allocDelta = curAlloc - _lastAlloc;
-            _lastAlloc = curAlloc;
-
-            var ws = GetWS();
-            var wsDelta = ws - _lastWs;
-            _lastWs = ws;
-
-            if (onMap && allocDelta > AllocSpikeBytes && _memSpikeCD <= 0.0)
+            finally
             {
-                MapPerfLog.Warn($"ALLOC spike +{allocDelta / 1_000_000.0:F1} MB");
-                _memSpikeCD = 5.0;
+                Interlocked.Exchange(ref _frameSeqStamped, 0);
             }
-
-            if (onMap && wsDelta > WsSpikeBytes && _memSpikeCD <= 0.0)
-            {
-                MapPerfLog.Warn($"WS spike +{wsDelta / 1_000_000.0:F1} MB");
-                _memSpikeCD = 5.0;
-            }
-
-            if (allocDelta > ForceFlushAllocBytes || wsDelta > ForceFlushWsBytes)
-            {
-                // Avoid huge string-building + aggregation on the UI thread while paused.
-                // Instead, schedule a near-term flush.
-                if (paused)
-                    _nextFlush = Math.Min(_nextFlush, 1.0);
-                else
-                    FlushSummary(true);
-            }
-
-            _nextFlush -= dt;
-            if (_frameSpikeCD > 0.0)
-                _frameSpikeCD = Math.Max(0.0, _frameSpikeCD - dt);
-            if (_memSpikeCD > 0.0)
-                _memSpikeCD = Math.Max(0.0, _memSpikeCD - dt);
-            if (_nextFlush <= 0.0)
-            {
-                // slower cadence while running; avoid summary flush during live play but fail-safe every ~30s
-                _nextFlush = paused ? 5.0 : 30.0;
-                if (onMap && (paused || allocDelta > 0 || wsDelta > 0))
-                    FlushSummary(force: false);
-            }
-
-            // Drain slices only while unpaused to avoid large pause pumps.
-            PeriodicSlicer.GetQueueStats(out var queueLength, out _, out _);
-            var pumpMs = 0.0;
-            if (!paused)
-            {
-                pumpMs = fast ? PumpBudgetFastMs : PumpBudgetRunMs;
-                if (queueLength >= PumpBacklogBoostThreshold)
-                    pumpMs += fast ? PumpBudgetFastBoostMs : PumpBudgetRunBoostMs;
-                if (overBudget)
-                    pumpMs = Math.Max(0.5, pumpMs * 0.25);
-            }
-            if (pumpMs > 0.0)
-                PeriodicSlicer.Pump(pumpMs);
         }
 
         [DllImport("kernel32.dll")]
@@ -1215,6 +1425,10 @@ namespace MapPerfProbe
         // bool-prefix: return false to skip original map frame hooks when throttling
         public static bool MapScreenOnFrameTickPrefix(object __instance, MethodBase __originalMethod)
         {
+            StampFrameSequence();
+            // Master switch: never throttle when disabled
+            if (!MapPerfConfig.Enabled) return true;
+
             var methodName = __originalMethod?.Name;
             if (methodName == null) return true;
 
@@ -1311,6 +1525,133 @@ namespace MapPerfProbe
 
             _mapHotGate = ShouldEnableMapHot(fastTime2);
             return true;
+        }
+
+        private static void PatchDesyncMapState(object harmony)
+        {
+            try
+            {
+                var prefix = typeof(SubModule).GetMethod(nameof(DesyncPrefix), HookBindingFlags);
+                if (prefix == null) return;
+
+                var ht = harmony.GetType();
+                var harmonyAsm = ht.Assembly;
+                var hmType = harmonyAsm.GetType("HarmonyLib.HarmonyMethod")
+                            ?? Type.GetType($"HarmonyLib.HarmonyMethod, {harmonyAsm.FullName}", false);
+                var hmCtor = hmType?.GetConstructor(new[] { typeof(MethodInfo) });
+                var patchMi = ht.GetMethod("Patch", new[] { typeof(MethodBase), hmType, hmType, hmType, hmType });
+                if (hmType == null || hmCtor == null || patchMi == null) return;
+
+                var prefixHm = hmCtor.Invoke(new object[] { prefix });
+
+                void ElevatePriority(object hm)
+                {
+                    if (hm == null) return;
+                    try
+                    {
+                        var prioProp = hmType.GetProperty("priority", BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+                        var prioField = hmType.GetField("priority", BindingFlags.Public | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+                        object highest = 400;
+                        var prioEnum = harmonyAsm.GetType("HarmonyLib.Priority");
+                        if (prioEnum != null && prioEnum.IsEnum)
+                        {
+                            try { highest = Enum.ToObject(prioEnum, 400); }
+                            catch { highest = 400; }
+                        }
+
+                        if (prioProp != null)
+                        {
+                            var pt = prioProp.PropertyType;
+                            if (pt.IsEnum)
+                                prioProp.SetValue(hm, highest);
+                            else if (pt == typeof(int))
+                                prioProp.SetValue(hm, 400);
+                        }
+
+                        if (prioField != null)
+                        {
+                            var ft = prioField.FieldType;
+                            if (ft.IsEnum)
+                                prioField.SetValue(hm, highest);
+                            else if (ft == typeof(int))
+                                prioField.SetValue(hm, 400);
+                        }
+                    }
+                    catch
+                    {
+                        // best-effort priority elevation
+                    }
+                }
+
+                ElevatePriority(prefixHm);
+
+                void PatchTarget(string typeName, string methodName)
+                {
+                    var t = FindType(typeName);
+                    if (t == null) return;
+
+                    MethodInfo target = null;
+                    try { target = t.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic); }
+                    catch { }
+                    if (target == null) return;
+                    if (target.ReturnType != typeof(void)) return;
+                    if (target.IsAbstract || target.ContainsGenericParameters || target.DeclaringType?.IsGenericTypeDefinition == true)
+                        return;
+
+                    try
+                    {
+                        patchMi.Invoke(harmony, new object[] { target, prefixHm, null, null, null });
+                        MapPerfLog.Info($"Patched {t.FullName}.{methodName} (desync)");
+                    }
+                    catch (Exception ex)
+                    {
+                        MapPerfLog.Error($"Patch fail {t.FullName}.{methodName} (desync)", ex);
+                    }
+                }
+
+                PatchTarget("TaleWorlds.CampaignSystem.GameState.MapState", "OnTick");
+                PatchTarget("TaleWorlds.CampaignSystem.GameState.MapState", "OnMapModeTick");
+                PatchTarget("TaleWorlds.CampaignSystem.MapState", "OnTick");
+                PatchTarget("TaleWorlds.CampaignSystem.MapState", "OnMapModeTick");
+            }
+            catch (Exception ex)
+            {
+                MapPerfLog.Error("PatchDesyncMapState failed", ex);
+            }
+        }
+
+        // return false => skip original (no Campaign tick this frame)
+        public static bool DesyncPrefix()
+        {
+            StampFrameSequence();
+            var skip = ShouldSkipSimulationNow();
+            var dtSnap = ReadLastFrameMsSnap();
+            var dt = dtSnap > 0.0 ? dtSnap : 16.0;
+            var seq = Volatile.Read(ref _frameSeq);
+            var forcedSeq = Volatile.Read(ref _forcedCatchupSeq);
+            var forced = forcedSeq == seq;
+            // ensure we add/subtract debt only once per frame even if multiple hooks run
+            var firstThisFrame = Interlocked.Exchange(ref _debtSeqApplied, seq) != seq;
+            if (firstThisFrame && skip)
+            {
+                var maxDebt = Math.Max(MapPerfConfig.MaxDesyncMs, 0);
+                var cap = maxDebt > 0 ? maxDebt * 2.0 : 0.0;
+                var nextDebt = _desyncDebtMs + dt;
+                _desyncDebtMs = cap > 0.0 ? Math.Min(cap, nextDebt) : nextDebt;
+            }
+            else if (firstThisFrame && _desyncDebtMs > 0.0)
+            {
+                _desyncDebtMs = Math.Max(0.0, _desyncDebtMs - dt);
+            }
+
+            if (MapPerfLog.DebugEnabled && firstThisFrame && forced && _forcedCatchupCooldown <= 0.0)
+            {
+                var debtSnap = Math.Max(0.0, _forcedCatchupDebtSnap);
+                MapPerfLog.Info($"[desync] forced catch-up ({debtSnap:F1} ms debt)");
+                _forcedCatchupCooldown = 2.0;
+            }
+
+            return !skip;
         }
 
         private static void InitAllocCounter()
@@ -1881,6 +2222,12 @@ namespace MapPerfProbe
         public static void PerfPrefix(object __instance, MethodBase __originalMethod, out State __state)
         {
             __state = default;
+
+            if (!MapPerfConfig.Enabled)
+            {
+                __state.Flags = StateFlagSkip;
+                return;
+            }
 
             if (_skipMapOnFrameTick)
             {

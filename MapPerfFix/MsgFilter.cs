@@ -80,6 +80,9 @@ namespace MapPerfProbe
 
         internal static bool ShouldBlock(string text)
         {
+            // Master switch: never block anything when disabled
+            if (!MapPerfConfig.Enabled) return false;
+
             if (string.IsNullOrWhiteSpace(text))
                 return false;
 
