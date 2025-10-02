@@ -37,6 +37,10 @@
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
   <ItemGroup>
+    <Reference Include="0Harmony">
+      <HintPath>packages\Lib.Harmony.2.4.1\lib\net472\0Harmony.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
     <Reference Include="System" />
     <Reference Include="TaleWorlds.ActivitySystem">
       <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.ActivitySystem.dll</HintPath>
@@ -85,9 +89,16 @@
     <Reference Include="TaleWorlds.TwoDimension">
       <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.TwoDimension.dll</HintPath>
     </Reference>
+    <Reference Include="MCM.Abstractions">
+      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\Modules\MCMv5\bin\Win64_Shipping_Client\MCM.Abstractions.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="MapPerfConfig.cs" />
     <Compile Include="MapPerfLog.cs" />
+    <Compile Include="MapPerfSettings.cs" />
+    <Compile Include="MsgFilter.cs" />
     <Compile Include="SubModule.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>

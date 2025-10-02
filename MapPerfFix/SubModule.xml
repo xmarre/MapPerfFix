@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Module>
+  <Name value="Map Performance Probe" />
+  <Id value="MapPerfProbe" />
+  <Version value="v1.0.0" />
+  <Singleplayer value="true" />
+  <Multiplayer value="false" />
+  <DependedModules>
+    <DependedModule Id="MCMv5" DependentVersion="v5" Optional="false" />
+  </DependedModules>
+  <SubModules>
+    <SubModule>
+      <Name value="Map Performance Probe" />
+      <DLLName value="MapPerfFix.dll" />
+      <SubModuleClassType value="MapPerfProbe.SubModule" />
+      <Tags>
+        <Tag key="DedicatedServerType" value="none" />
+      </Tags>
+    </SubModule>
+  </SubModules>
+</Module>
