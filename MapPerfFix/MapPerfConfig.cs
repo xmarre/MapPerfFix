@@ -17,7 +17,7 @@ namespace MapPerfProbe
                         if (allowEmptyString || !string.IsNullOrEmpty(str))
                             return value;
                     }
-                    else if (!(value is null))
+                    else if (!object.ReferenceEquals(value, null))
                     {
                         return value;
                     }
