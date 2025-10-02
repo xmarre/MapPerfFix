@@ -46,12 +46,13 @@ namespace MapPerfProbe
         [ThreadStatic] private static bool _mapHotGate;
         [ThreadStatic] private static int _uiContextDepth;
         private static bool _debugToggleComboActive;
+        private static bool _debugOverride;
         private static double _frameBudgetMs = 1000.0 / 60.0;
         private static double _frameBudgetEmaMs;
-        private const double BudgetAlpha = 0.05;
-        private const double BudgetHeadroom = 1.20;
-        private const double BudgetMinMs = 4.0;
-        private const double BudgetMaxMs = 33.5;
+        private static double BudgetAlpha => MapPerfConfig.BudgetAlpha;
+        private static double BudgetHeadroom => MapPerfConfig.BudgetHeadroom;
+        private static double BudgetMinMs => MapPerfConfig.BudgetMinMs;
+        private static double BudgetMaxMs => MapPerfConfig.BudgetMaxMs;
         private static readonly double[] CommonPeriodsMs =
         {
             1000.0 / 240.0,
@@ -76,24 +77,24 @@ namespace MapPerfProbe
             1000.0 / 40.0,
             1000.0 / 30.0
         };
-        private const double SnapEpsMs = 0.40;
+        private static double SnapEpsMs => MapPerfConfig.SnapEpsMs;
         private const int OverBudgetStreakCap = 1_000;
-        private const int HotEnableStreak = 2;
-        private const double SpikeRunMs = 50.0;
-        private const double SpikePausedMs = 80.0;
-        private const double FlushOnHugeFrameMs = 200.0;
-        private const long AllocSpikeBytes = 25_000_000;
-        private const long WsSpikeBytes = 75_000_000;
-        private const long ForceFlushAllocBytes = 150_000_000;
-        private const long ForceFlushWsBytes = 250_000_000;
+        private static int HotEnableStreak => MapPerfConfig.HotEnableStreak;
+        private static double SpikeRunMs => MapPerfConfig.SpikeRunMs;
+        private static double SpikePausedMs => MapPerfConfig.SpikePausedMs;
+        private static double FlushOnHugeFrameMs => MapPerfConfig.FlushOnHugeFrameMs;
+        private static long AllocSpikeBytes => MapPerfConfig.AllocSpikeBytes;
+        private static long WsSpikeBytes => MapPerfConfig.WsSpikeBytes;
+        private static long ForceFlushAllocBytes => MapPerfConfig.ForceFlushAllocBytes;
+        private static long ForceFlushWsBytes => MapPerfConfig.ForceFlushWsBytes;
         private static int _overBudgetStreak;
         private static readonly ConcurrentDictionary<MethodBase, long> MapHotCooldowns =
             new ConcurrentDictionary<MethodBase, long>();
         private static long _mapHotLastPruneTs;
         private static Func<long> _getAllocForThread;
-        private const double MapHotDurationMsThreshold = 1.0;
-        private const long MapHotAllocThresholdBytes = 128_000;
-        private const double MapHotCooldownSeconds = 0.05;
+        private static double MapHotDurationMsThreshold => MapPerfConfig.MapHotDurationMsThreshold;
+        private static long MapHotAllocThresholdBytes => MapPerfConfig.MapHotAllocThresholdBytes;
+        private static double MapHotCooldownSeconds => MapPerfConfig.MapHotCooldownSeconds;
         private const int MapHotCooldownPruneLimit = 2_000;
         private const double MapHotCooldownPruneWindowMultiplier = 10.0;
         private const double RootChildBaseCutoffMs = 0.5;
@@ -105,11 +106,12 @@ namespace MapPerfProbe
         private static readonly ConcurrentDictionary<Type, Func<object, int?>> CountResolvers =
             new ConcurrentDictionary<Type, Func<object, int?>>();
         private static readonly object MapScreenProbeLock = new object();
-        private const double MapScreenProbeDtThresholdMs = 12.0;
+        private static double MapScreenProbeDtThresholdMs => MapPerfConfig.MapScreenProbeDtThresholdMs;
         private static List<MapFieldProbe> _mapScreenProbes;
         private static Type _mapScreenProbeType;
         private static Type _mapScreenType;
         private static double _mapScreenNextLog;
+        private static double _nextFilterLog = 10.0;
         private static readonly StringBuilder MapScreenLogBuilder = new StringBuilder(320);
         private static readonly HashSet<string> MapScreenFrameHooks = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -146,11 +148,11 @@ namespace MapPerfProbe
         internal static bool PausedSnapshot => _snapPaused;
         internal static bool FastSnapshot => _snapFast;
         internal static bool FastOrPausedSnapshot => _snapPaused || _snapFast;
-        private const double PumpBudgetRunMs = 3.0;
-        private const double PumpBudgetFastMs = 8.0;
-        private const double PumpBudgetRunBoostMs = 4.0;
-        private const double PumpBudgetFastBoostMs = 16.0;
-        internal const int PumpBacklogBoostThreshold = 10_000;
+        private static double PumpBudgetRunMs => MapPerfConfig.PumpBudgetRunMs;
+        private static double PumpBudgetFastMs => MapPerfConfig.PumpBudgetFastMs;
+        private static double PumpBudgetRunBoostMs => MapPerfConfig.PumpBudgetRunBoostMs;
+        private static double PumpBudgetFastBoostMs => MapPerfConfig.PumpBudgetFastBoostMs;
+        internal static int PumpBacklogBoostThreshold => MapPerfConfig.PumpBacklogBoostThreshold;
         private const int ChildInlineAllowEveryN = 120;
         private const int ChildInlineAllowanceMin = 8;
         private const int ChildInlineAllowanceHalfThresholdPct = 95;
@@ -173,6 +175,7 @@ namespace MapPerfProbe
         }
 
         private static FrameMode _lastFrameMode;
+        private static bool _wasOnMap;
         private const byte StateFlagSkip = 1;
         private const byte StateFlagUiContext = 2;
 
@@ -237,16 +240,22 @@ namespace MapPerfProbe
         // --- MapScreen throttling (real perf tweak) ---
         private static GCLatencyMode _prevGcMode = GCSettings.LatencyMode;
         private static int _mapScreenSkipFrames;
-        private const double MapScreenBackoffMs1 = 10.0; // if a frame takes ≥10ms, skip next 1 frame
-        private const double MapScreenBackoffMs2 = 14.0; // if a frame takes ≥14ms, skip next 2 frames
-        private const int MapScreenSkipFrames1 = 1;
-        private const int MapScreenSkipFrames2 = 2;
+        private static double MapScreenBackoffMs1 => MapPerfConfig.MapScreenBackoffMs1;
+        private static double MapScreenBackoffMs2 => MapPerfConfig.MapScreenBackoffMs2;
+        private static int MapScreenSkipFrames1 => MapPerfConfig.MapScreenSkipFrames1;
+        private static int MapScreenSkipFrames2 => MapPerfConfig.MapScreenSkipFrames2;
+        private static int MapScreenSkipFramesCap => MapPerfConfig.MapScreenSkipFramesCap;
 
         protected override void OnSubModuleLoad()
         {
             if (_didPatch) return;
             _didPatch = true;
             MapPerfLog.Info("=== MapPerfProbe start ===");
+
+            try { _ = MapPerfSettings.Instance; }
+            catch { /* ignore if MCM not present */ }
+
+            MsgFilter.RefreshFamilyMaskFromConfig();
 
             try
             {
@@ -256,6 +265,23 @@ namespace MapPerfProbe
                     MapPerfLog.Warn("Harmony not found; only frame/GC logging.");
                     _didPatch = false;
                     return;
+                }
+
+                try
+                {
+                    if (harmony is HarmonyLib.Harmony typedHarmony)
+                    {
+                        typedHarmony.PatchAll(typeof(MsgFilter).Assembly);
+                    }
+                    else
+                    {
+                        var patchAllMi = harmony.GetType().GetMethod("PatchAll", new[] { typeof(Assembly) });
+                        patchAllMi?.Invoke(harmony, new object[] { typeof(MsgFilter).Assembly });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MapPerfLog.Warn($"PatchAll failed: {ex.Message}");
                 }
 
                 // GC latency tuning – reduce full-blocking pauses during map play
@@ -424,6 +450,7 @@ namespace MapPerfProbe
                     MapPerfLog.DebugEnabled = enabled;
                     MapPerfLog.Info($"[debug] MapPerfProbe debug logging {(enabled ? "enabled" : "disabled")} (Ctrl+Shift+F10)");
                     _debugToggleComboActive = true;
+                    _debugOverride = true;
                     return;
                 }
 
@@ -440,13 +467,42 @@ namespace MapPerfProbe
         {
             var paused = IsPaused();
             var fast = IsFastTime();
+            MsgFilter.RefreshFamilyMaskFromConfig();
             TryHandleDebugToggle();
+            if (!_debugOverride)
+            {
+                MapPerfLog.DebugEnabled = MapPerfConfig.DebugLogging;
+            }
+            else if (MapPerfLog.DebugEnabled == MapPerfConfig.DebugLogging)
+            {
+                _debugOverride = false;
+            }
+            if (MapPerfLog.DebugEnabled)
+            {
+                _nextFilterLog -= dt;
+                if (_nextFilterLog <= 0.0)
+                {
+                    _nextFilterLog = 10.0;
+                    var blocked = Volatile.Read(ref MsgFilter.FilterCount);
+                    MapPerfLog.Info($"[filter] blocked {blocked} messages total");
+                }
+            }
+            else
+            {
+                _nextFilterLog = 10.0;
+            }
             var nextMode = paused ? FrameMode.Paused : (fast ? FrameMode.Fast : FrameMode.Run);
             if (nextMode != _lastFrameMode)
                 HandleFrameModeTransition(nextMode);
             _snapPaused = paused;
             _snapFast = fast;
             var onMap = IsOnMap();
+            if (onMap != _wasOnMap)
+            {
+                _wasOnMap = onMap;
+                if (onMap)
+                    Interlocked.Exchange(ref MsgFilter.FilterCount, 0);
+            }
             var frameTag = paused ? "[PAUSED]" : (fast ? "[RUN-FAST]" : "[RUN]");
             if (!onMap)
                 PeriodicSlicer.ClearCachesIfIdle();
@@ -1172,15 +1228,26 @@ namespace MapPerfProbe
                 if (__instance == null || paused)
                 {
                     _skipMapOnFrameTick = false;
+                    _mapScreenSkipFrames = 0;
                     return true;
                 }
 
                 var fastTime = IsFastTime();
-                _mapHotGate = ShouldEnableMapHot(fastTime);
                 _mapScreenFastTime = fastTime;
                 _mapScreenFastTimeValid = true;
+                _mapHotGate = ShouldEnableMapHot(fastTime);
 
-                if (!fastTime)
+                var throttleEnabled = MapPerfConfig.EnableMapThrottle;
+                var throttleOnlyFast = MapPerfConfig.ThrottleOnlyInFastTime;
+
+                if (!throttleEnabled)
+                {
+                    _skipMapOnFrameTick = false;
+                    _mapScreenSkipFrames = 0;
+                    return true;
+                }
+
+                if (throttleOnlyFast && !fastTime)
                 {
                     _skipMapOnFrameTick = false;
                     _mapScreenSkipFrames = 0;
@@ -1215,12 +1282,22 @@ namespace MapPerfProbe
             }
 
             bool fastTime2 = hadFastTime ? cachedFastTime : IsFastTime();
-            if (!fastTime2)
+            var throttleEnabled2 = MapPerfConfig.EnableMapThrottle;
+            var throttleOnlyFast2 = MapPerfConfig.ThrottleOnlyInFastTime;
+            if (!throttleEnabled2)
+            {
+                _mapScreenThrottleActive = false;
+                _skipMapOnFrameTick = false;
+                _mapHotGate = ShouldEnableMapHot(fastTime2);
+                return true;
+            }
+
+            if (throttleOnlyFast2 && !fastTime2)
             {
                 _mapScreenThrottleActive = false;
                 _skipMapOnFrameTick = false;
                 _mapScreenSkipFrames = 0;
-                _mapHotGate = ShouldEnableMapHot(false);
+                _mapHotGate = ShouldEnableMapHot(fastTime2);
                 return true;
             }
 
@@ -1232,7 +1309,7 @@ namespace MapPerfProbe
                 return false;
             }
 
-            _mapHotGate = ShouldEnableMapHot(true);
+            _mapHotGate = ShouldEnableMapHot(fastTime2);
             return true;
         }
 
@@ -1856,15 +1933,15 @@ namespace MapPerfProbe
             __state.Flags = flags;
         }
 
-    public static void PerfPostfix(object __instance, MethodBase __originalMethod, State __state)
-    {
-        if ((__state.Flags & StateFlagSkip) != 0)
-            return;
-        if (__state.ts == 0) return;
-        var dt = (Stopwatch.GetTimestamp() - __state.ts) * TicksToMs;
-        if (__originalMethod == null)
+        public static void PerfPostfix(object __instance, MethodBase __originalMethod, State __state)
         {
-            _mapScreenFastTimeValid = false;
+            if ((__state.Flags & StateFlagSkip) != 0)
+                return;
+            if (__state.ts == 0) return;
+            var dt = (Stopwatch.GetTimestamp() - __state.ts) * TicksToMs;
+            if (__originalMethod == null)
+            {
+                _mapScreenFastTimeValid = false;
                 return;
             }
 
@@ -1883,12 +1960,44 @@ namespace MapPerfProbe
                         var fastTime = _mapScreenFastTimeValid ? _mapScreenFastTime : IsFastTime();
                         _mapScreenFastTimeValid = false;
                         _mapHotGate = false;
-                        if (fastTime)
+
+                        var throttleEnabled3 = MapPerfConfig.EnableMapThrottle;
+                        var throttleOnlyFast3 = MapPerfConfig.ThrottleOnlyInFastTime;
+                        if (!throttleEnabled3)
                         {
-                            if (dt >= MapScreenBackoffMs2)
-                                _mapScreenSkipFrames = Math.Max(_mapScreenSkipFrames, MapScreenSkipFrames2);
-                            else if (dt >= MapScreenBackoffMs1)
-                                _mapScreenSkipFrames = Math.Max(_mapScreenSkipFrames, MapScreenSkipFrames1);
+                            _mapScreenSkipFrames = 0;
+                        }
+                        else
+                        {
+                            var allowThrottle = !throttleOnlyFast3 || fastTime;
+                            if (!allowThrottle)
+                            {
+                                _mapScreenSkipFrames = 0;
+                            }
+                            else
+                            {
+                                var cap = MapScreenSkipFramesCap;
+                                if (cap <= 0)
+                                {
+                                    _mapScreenSkipFrames = 0;
+                                }
+                                else
+                                {
+                                    if (dt >= MapScreenBackoffMs2)
+                                    {
+                                        if (_mapScreenSkipFrames < MapScreenSkipFrames2)
+                                            _mapScreenSkipFrames = MapScreenSkipFrames2;
+                                    }
+                                    else if (dt >= MapScreenBackoffMs1)
+                                    {
+                                        if (_mapScreenSkipFrames < MapScreenSkipFrames1)
+                                            _mapScreenSkipFrames = MapScreenSkipFrames1;
+                                    }
+
+                                    if (_mapScreenSkipFrames > cap)
+                                        _mapScreenSkipFrames = cap;
+                                }
+                            }
                         }
                     }
                     else if (methodName != null && MapScreenFrameHooks.Contains(methodName))
