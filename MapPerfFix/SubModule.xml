@@ -6,7 +6,7 @@
   <Singleplayer value="true" />
   <Multiplayer value="false" />
   <DependedModules>
-    <DependedModule Id="MCMv5" DependentVersion="v5" Optional="false" />
+    <DependedModule Id="MCMv5" DependentVersion="v5" Optional="true" />
   </DependedModules>
   <SubModules>
     <SubModule>
