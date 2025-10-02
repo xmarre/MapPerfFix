@@ -105,6 +105,57 @@ namespace MapPerfProbe
             new ConcurrentDictionary<MethodBase, double>();
         private static readonly ConcurrentDictionary<Type, Func<object, int?>> CountResolvers =
             new ConcurrentDictionary<Type, Func<object, int?>>();
+        private static readonly ConcurrentDictionary<MethodInfo, long> _lastDailyIdx =
+            new ConcurrentDictionary<MethodInfo, long>();
+        private static readonly ConcurrentDictionary<MethodInfo, long> _lastHourlyIdx =
+            new ConcurrentDictionary<MethodInfo, long>();
+        private static readonly ConcurrentDictionary<MethodInfo, long> _lastWeeklyIdx =
+            new ConcurrentDictionary<MethodInfo, long>();
+        private static readonly ConcurrentDictionary<string, double> _slowLogNext =
+            new ConcurrentDictionary<string, double>();
+        private static double _slowLogPruneNext;
+        private const int SlowLogPruneLimit = 2_048;
+        private const double SlowLogPruneIntervalSeconds = 30.0;
+        private const double SlowLogRetainSeconds = 30.0;
+        private static Type _campaignBehaviorManagerType;
+        private static PropertyInfo _campaignBehaviorManagerProp;
+        private static PropertyInfo _campaignBehaviorsProp;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static double NowSec() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool ShouldLogSlow(string key, double windowSec = 5.0)
+        {
+            var now = NowSec();
+            var pruneDue = now >= Volatile.Read(ref _slowLogPruneNext);
+            if (_slowLogNext.Count > SlowLogPruneLimit || pruneDue)
+            {
+                var next = Volatile.Read(ref _slowLogPruneNext);
+                if (now >= next &&
+                    Interlocked.CompareExchange(ref _slowLogPruneNext, now + SlowLogPruneIntervalSeconds, next) == next)
+                    PruneSlowLogCache(now);
+            }
+            if (_slowLogNext.TryGetValue(key, out var until) && now < until) return false;
+            _slowLogNext[key] = now + windowSec;
+            return true;
+        }
+        private static void PruneSlowLogCache(double now)
+        {
+            if (_slowLogNext.IsEmpty) return;
+            foreach (var kv in _slowLogNext)
+            {
+                if (kv.Value < now - SlowLogRetainSeconds)
+                    _slowLogNext.TryRemove(kv.Key, out _);
+            }
+        }
+        private static void ClearRunGates()
+        {
+            _lastDailyIdx.Clear();
+            _lastHourlyIdx.Clear();
+            _lastWeeklyIdx.Clear();
+            _slowLogNext.Clear();
+            _dispatcherChildCursor.Clear();
+            Volatile.Write(ref _slowLogPruneNext, 0.0);
+        }
         private static readonly object MapScreenProbeLock = new object();
         private static double MapScreenProbeDtThresholdMs => MapPerfConfig.MapScreenProbeDtThresholdMs;
         private static List<MapFieldProbe> _mapScreenProbes;
@@ -324,10 +375,18 @@ namespace MapPerfProbe
                         TryPatchType(
                             harmony,
                             "TaleWorlds.CampaignSystem.CampaignEventDispatcher",
-                            new[] { "DailyTick", "HourlyTick" },
+                            new[] { "DailyTick", "HourlyTick", "OnDailyTick", "OnHourlyTick" },
                             prefix: typeof(SubModule).GetMethod(nameof(OnDailyTick_Prefix), HookBindingFlags),
                             prefix2: typeof(SubModule).GetMethod(nameof(OnHourlyTick_Prefix), HookBindingFlags));
                     });
+                SafePatch("Defer Campaign.DailyTick core",
+                    () => TryPatchType(
+                        harmony,
+                        "TaleWorlds.CampaignSystem.Campaign",
+                        new[] { "DailyTick" },
+                        typeof(SubModule).GetMethod(nameof(DeferCampaignDailyTick_Prefix), HookBindingFlags),
+                        null,
+                        null));
                 SafePatch("Slice CampaignEvents Daily/Hourly",
                     () =>
                     {
@@ -344,8 +403,13 @@ namespace MapPerfProbe
                         TryPatchType(
                             harmony,
                             "TaleWorlds.CampaignSystem.CampaignEventDispatcher",
-                            new[] { "QuarterDailyPartyTick", "TickPartialHourlyAi", "AiHourlyTick", "WeeklyTick" },
+                            new[] { "QuarterDailyPartyTick", "TickPartialHourlyAi", "AiHourlyTick" },
                             typeof(SubModule).GetMethod(nameof(PeriodicHub_Prefix), HookBindingFlags));
+                        TryPatchType(
+                            harmony,
+                            "TaleWorlds.CampaignSystem.CampaignEventDispatcher",
+                            new[] { "WeeklyTick" },
+                            typeof(SubModule).GetMethod(nameof(OnWeeklyTick_Prefix), HookBindingFlags));
                     });
                 SafePatch("Slice CampaignEvents periodics (static hub)",
                     () =>
@@ -353,8 +417,13 @@ namespace MapPerfProbe
                         TryPatchType(
                             harmony,
                             "TaleWorlds.CampaignSystem.CampaignEvents",
-                            new[] { "QuarterDailyPartyTick", "TickPartialHourlyAi", "AiHourlyTick", "WeeklyTick" },
+                            new[] { "QuarterDailyPartyTick", "TickPartialHourlyAi", "AiHourlyTick" },
                             typeof(SubModule).GetMethod(nameof(PeriodicHub_Prefix), HookBindingFlags));
+                        TryPatchType(
+                            harmony,
+                            "TaleWorlds.CampaignSystem.CampaignEvents",
+                            new[] { "WeeklyTick" },
+                            typeof(SubModule).GetMethod(nameof(OnWeeklyTick_Prefix), HookBindingFlags));
                     });
                 SafePatch("Slice PeriodicEventManager helpers",
                     () => TryPatchType(
@@ -390,12 +459,27 @@ namespace MapPerfProbe
         protected override void OnGameStart(Game game, IGameStarter gameStarterObject)
         {
             base.OnGameStart(game, gameStarterObject);
+            ClearRunGates();
             PeriodicSlicer.ResetHourlyGates();
+        }
+
+        protected override void OnBeforeInitialModuleScreenSetAsRoot()
+        {
+            base.OnBeforeInitialModuleScreenSetAsRoot();
+            ClearRunGates();
         }
 
         public override void OnGameLoaded(Game game, object initializerObject)
         {
             base.OnGameLoaded(game, initializerObject);
+            ClearRunGates();
+            PeriodicSlicer.ResetHourlyGates();
+        }
+
+        public override void OnGameEnd(Game game)
+        {
+            base.OnGameEnd(game);
+            ClearRunGates();
             PeriodicSlicer.ResetHourlyGates();
         }
 
@@ -403,6 +487,7 @@ namespace MapPerfProbe
         {
             try
             {
+                ClearRunGates();
                 var harmony = CreateHarmony();
                 harmony?.GetType().GetMethod("UnpatchAll", new[] { typeof(string) })?.Invoke(harmony, new object[] { HId });
             }
@@ -1117,16 +1202,62 @@ namespace MapPerfProbe
             }
         }
 
+        private static bool DeferCampaignDailyTick_Prefix(object __instance, MethodBase __originalMethod)
+        {
+            if (!MapPerfConfig.Enabled) return true;
+            if (!IsOnMap()) return true;
+            if (!FastSnapshot && Volatile.Read(ref _overBudgetStreak) <= 0) return true;
+            if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
+
+            var target = __instance;
+            var mi = __originalMethod as MethodInfo;
+            if (!PeriodicSlicer.EnqueueActionWithBypass(__originalMethod, () =>
+            {
+                var sw = Stopwatch.StartNew();
+                try { mi?.Invoke(target, null); }
+                catch (Exception ex)
+                {
+                    const string excKey = "exc:Campaign.DailyTick";
+                    if (ShouldLogSlow(excKey, 30.0))
+                        MapPerfLog.Warn($"Deferred Campaign.DailyTick failed: {ex}");
+                }
+                finally
+                {
+                    sw.Stop();
+                    if (sw.Elapsed.TotalMilliseconds > 12.0)
+                    {
+                        const string slowKey = "Campaign.DailyTick";
+                        if (ShouldLogSlow(slowKey))
+                            MapPerfLog.Warn($"[slow-job] Campaign.DailyTick took {sw.Elapsed.TotalMilliseconds:F1} ms");
+                    }
+                }
+            }))
+                return true;
+            return false;
+        }
+
         // Handle both instance hubs (dispatcher) and static hubs (CampaignEvents) with reentry guard
         public static bool OnDailyTick_Prefix(object __instance, MethodBase __originalMethod)
         {
+            if (__originalMethod == null) return true;
+            if (!MapPerfConfig.Enabled) return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
-            var handled = PeriodicSlicer.RedirectAny(__instance, __originalMethod, "OnDailyTick");
+            var name = __originalMethod?.Name ?? string.Empty;
+            // Split the dispatcher hub: handle exact names on .NET 4.7.2
+            if (name == "DailyTick" || name == "OnDailyTick")
+            {
+                if (SplitAndEnqueueDispatcherChildren(__instance, "DailyTick", __originalMethod)) return false;
+                if (SplitAndEnqueueDispatcherChildren(__instance, "OnDailyTick", __originalMethod)) return false;
+            }
+
+            // Fallback to generic redirect.
+            var handled = PeriodicSlicer.RedirectAny(__instance, __originalMethod, name);
             return !handled;
         }
 
         public static bool OnHourlyTick_Prefix(object __instance, MethodBase __originalMethod)
         {
+            if (__originalMethod == null) return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
 
             long hourNow;
@@ -1145,8 +1276,325 @@ namespace MapPerfProbe
                 return !handledFallback;
             }
 
+            // Split like Daily
+            if (SplitAndEnqueueDispatcherChildren(__instance, "HourlyTick", __originalMethod)) return false;
+            if (SplitAndEnqueueDispatcherChildren(__instance, "OnHourlyTick", __originalMethod)) return false;
+
             var handled = PeriodicSlicer.RedirectHourlyWithGate(__instance, __originalMethod, hourNow, out _);
             return !handled;
+        }
+
+        public static bool OnWeeklyTick_Prefix(object __instance, MethodBase __originalMethod)
+        {
+            if (__originalMethod == null) return true;
+            if (!MapPerfConfig.Enabled) return true;
+            if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
+            if (SplitAndEnqueueDispatcherChildren(__instance, "WeeklyTick", __originalMethod, isWeekly: true))
+                return false;
+
+            var handled = PeriodicSlicer.RedirectAny(__instance, __originalMethod, "WeeklyTick");
+            return !handled;
+        }
+
+        // Reflect the behavior list and enqueue each child method as its own job.
+        private static bool SplitAndEnqueueDispatcherChildren(object dispatcher, string childMethod, MethodBase hub, bool isWeekly = false)
+        {
+            try
+            {
+                var behaviors = CollectUniqueBehaviors(dispatcher);
+                var count = behaviors.Count;
+                if (count == 0) return false;
+
+                var any = false;
+
+                // Backpressure-aware per-hub enqueue cap
+                int cap = int.MaxValue;
+                var nearFull = PeriodicSlicer.IsQueueNearFull();
+                if (FastSnapshot)
+                    cap = nearFull ? 1 : 4;         // strict in fast-time
+                else if (nearFull)
+                    cap = 2;                        // gentle trickle in normal time
+                if (cap < 1) cap = 1;
+                int enq = 0;
+
+                var isDaily = childMethod == "DailyTick" || childMethod == "OnDailyTick";
+                var gate = isWeekly ? _lastWeeklyIdx : (isDaily ? _lastDailyIdx : _lastHourlyIdx);
+
+                long idxNow = long.MinValue;
+                CampaignTime now = default;
+                bool haveTime = false;
+                if (gate != null)
+                {
+                    try
+                    {
+                        now = CampaignTime.Now;
+                        haveTime = true;
+                    }
+                    catch
+                    {
+                        haveTime = false;
+                    }
+
+                    if (haveTime)
+                    {
+                        if (isWeekly)
+                            idxNow = (long)Math.Floor(now.ToDays / 7.0);
+                        else if (isDaily)
+                            idxNow = (long)Math.Floor(now.ToDays);
+                        else
+                            idxNow = (long)Math.Floor(now.ToHours);
+                    }
+                }
+
+                var cursorKey = hub != null ? (hub, childMethod ?? string.Empty) : ((MethodBase, string)?)null;
+                int start = 0;
+                if (cursorKey.HasValue)
+                {
+                    var existing = _dispatcherChildCursor.GetOrAdd(cursorKey.Value, 0);
+                    if (existing < 0) existing = 0;
+                    start = count > 0 ? existing % count : 0;
+                }
+
+                for (var offset = 0; offset < count; offset++)
+                {
+                    if (cap != int.MaxValue && enq >= cap) break;
+
+                    var idx = (start + offset) % count;
+                    var beh = behaviors[idx];
+                    var behType = beh?.GetType();
+                    if (behType == null) continue;
+
+                    var mi = ResolveTickMi(behType, childMethod);
+                    if (mi == null || mi.GetParameters().Length != 0) continue;
+
+                    MethodInfo primaryTick = null;
+                    if (childMethod == "OnDailyTick" || childMethod == "OnHourlyTick")
+                    {
+                        var primaryName = childMethod == "OnDailyTick" ? "DailyTick" : "HourlyTick";
+                        primaryTick = ResolveTickMi(behType, primaryName);
+                    }
+
+                    // If On* exists but a plain *Tick also exists, skip On* to avoid double work.
+                    if (primaryTick != null && primaryTick.GetParameters().Length == 0) continue;
+
+                    var idxGate = idxNow;
+                    if (idxGate != long.MinValue && gate != null && gate.TryGetValue(mi, out var prev) && prev == idxGate)
+                        continue;
+
+                    var behName = behType.Name;
+                    var behKey = behType.FullName ?? behName;
+
+                    // Use the child MethodInfo as the queue key to avoid coalescing on the hub.
+                    var ok = PeriodicSlicer.EnqueueActionWithBypass(mi, () =>
+                    {
+                        var sw = Stopwatch.StartNew();
+                        try { mi.Invoke(beh, null); }
+                        catch (Exception ex)
+                        {
+                            var excKey = $"exc:{childMethod}:{behKey}";
+                            if (ShouldLogSlow(excKey, 30.0))
+                                MapPerfLog.Warn($"Deferred {childMethod} {behName} failed: {ex}");
+                        }
+                        finally
+                        {
+                            sw.Stop();
+                            if (sw.Elapsed.TotalMilliseconds > 12.0)
+                            {
+                                var slowKey = $"{childMethod}:{behKey}";
+                                if (ShouldLogSlow(slowKey))
+                                    MapPerfLog.Warn($"[slow-job] {childMethod} {behName} took {sw.Elapsed.TotalMilliseconds:F1} ms");
+                            }
+                        }
+                    });
+                    if (ok)
+                    {
+                        any = true;
+                        if (idxGate != long.MinValue && gate != null)
+                            gate[mi] = idxGate;
+
+                        enq++;
+                        if (enq >= cap) break; // defer remaining children to next hub call/frame
+                    }
+                }
+
+                if (cursorKey.HasValue && count > 0)
+                {
+                    var advance = Math.Max(enq, 1);
+                    var next = (start + advance) % count;
+                    _dispatcherChildCursor.AddOrUpdate(cursorKey.Value, next, (_, __) => next);
+                }
+
+                // If we scheduled any children, skip the hub invoke.
+                if (any) return true;
+            }
+            catch (Exception ex)
+            {
+                MapPerfLog.Warn($"SplitAndEnqueue {childMethod} failed: {ex.Message}");
+            }
+
+            return false;
+        }
+
+        // Try several routes to enumerate campaign behaviors.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static IEnumerable<object> EnumCampaignBehaviors(object dispatcher)
+        {
+            if (TryGetCampaignBehaviorList(out var coreList))
+            {
+                foreach (var beh in coreList)
+                    yield return beh;
+            }
+
+            foreach (var beh in EnumerateDispatcherFieldBehaviors(dispatcher))
+                yield return beh;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool TryGetCampaignBehaviorList(out IEnumerable coreList)
+        {
+            coreList = null;
+            try
+            {
+                var campT = _campaignType ?? (_campaignType = AccessTools.TypeByName("TaleWorlds.CampaignSystem.Campaign"));
+                var currentProp = _campaignCurrentProp ??
+                                  (_campaignCurrentProp = campT?.GetProperty("Current", BindingFlags.Static | BindingFlags.Public));
+                var campaign = currentProp?.GetValue(null);
+                if (campaign == null) return false;
+
+                var campaignType = campaign.GetType();
+                var managerProp = _campaignBehaviorManagerProp;
+                if (managerProp == null || managerProp.ReflectedType != campaignType)
+                {
+                    managerProp = campaignType.GetProperty("CampaignBehaviorManager", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (managerProp == null)
+                    {
+                        _campaignBehaviorManagerProp = null;
+                        return false;
+                    }
+                    _campaignBehaviorManagerProp = managerProp;
+                }
+
+                var manager = managerProp.GetValue(campaign);
+                if (manager == null) return false;
+
+                var managerType = manager.GetType();
+                if (!ReferenceEquals(managerType, _campaignBehaviorManagerType))
+                {
+                    _campaignBehaviorManagerType = managerType;
+                    _campaignBehaviorsProp = null;
+                }
+
+                var behaviorsProp = _campaignBehaviorsProp;
+                if (behaviorsProp == null || behaviorsProp.ReflectedType != managerType)
+                {
+                    behaviorsProp = managerType.GetProperty("CampaignBehaviors", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    _campaignBehaviorsProp = behaviorsProp;
+                }
+                coreList = behaviorsProp?.GetValue(manager) as IEnumerable;
+                return coreList != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static IEnumerable<object> EnumerateDispatcherFieldBehaviors(object dispatcher)
+        {
+            var dt = dispatcher?.GetType();
+            if (dt == null) yield break;
+
+            foreach (var field in dt.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                var ft = field.FieldType;
+                if (ft == null) continue;
+                if (!typeof(IEnumerable).IsAssignableFrom(ft)) continue;
+                if (IsDictionaryLike(ft)) continue;
+                if (field.GetValue(dispatcher) is not IEnumerable en) continue;
+                foreach (var beh in en)
+                    yield return beh;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool IsDictionaryLike(Type type)
+        {
+            if (type == null) return false;
+            if (typeof(IDictionary).IsAssignableFrom(type)) return true;
+            foreach (var iface in type.GetInterfaces())
+            {
+                if (iface == typeof(IDictionary)) return true;
+                if (!iface.IsGenericType) continue;
+                var genericDef = iface.GetGenericTypeDefinition();
+                if (genericDef == typeof(IDictionary<,>)) return true;
+                if (genericDef == typeof(IReadOnlyDictionary<,>)) return true;
+                if (genericDef == typeof(IEnumerable<>))
+                {
+                    var arg = iface.GetGenericArguments();
+                    if (arg.Length == 1 && IsKeyValuePair(arg[0])) return true;
+                }
+            }
+
+            if (type.IsGenericType)
+            {
+                var def = type.GetGenericTypeDefinition();
+                if (def == typeof(System.Collections.ObjectModel.ReadOnlyDictionary<,>)) return true;
+                if (def == typeof(ConcurrentDictionary<,>)) return true;
+                if (def == typeof(IEnumerable<>))
+                {
+                    var args = type.GetGenericArguments();
+                    if (args.Length == 1 && IsKeyValuePair(args[0])) return true;
+                }
+            }
+
+            return false;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool IsKeyValuePair(Type type)
+        {
+            if (type == null || !type.IsGenericType) return false;
+            return type.GetGenericTypeDefinition() == typeof(KeyValuePair<,>);
+        }
+
+        private static readonly ConcurrentDictionary<(MethodBase Hub, string Child), int> _dispatcherChildCursor =
+            new ConcurrentDictionary<(MethodBase, string), int>();
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static List<object> CollectUniqueBehaviors(object dispatcher)
+        {
+            var list = new List<object>();
+            var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
+            foreach (var beh in EnumCampaignBehaviors(dispatcher))
+            {
+                if (beh == null) continue;
+                if (seen.Add(beh)) list.Add(beh);
+            }
+            return list;
+        }
+
+        private sealed class ReferenceEqualityComparer : IEqualityComparer<object>
+        {
+            internal static readonly ReferenceEqualityComparer Instance = new ReferenceEqualityComparer();
+
+            private ReferenceEqualityComparer()
+            {
+            }
+
+            bool IEqualityComparer<object>.Equals(object x, object y) => ReferenceEquals(x, y);
+
+            int IEqualityComparer<object>.GetHashCode(object obj) => RuntimeHelpers.GetHashCode(obj);
+        }
+
+        private static readonly ConcurrentDictionary<(Type Type, string Name), MethodInfo> _tickMiCache =
+            new ConcurrentDictionary<(Type, string), MethodInfo>();
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static MethodInfo ResolveTickMi(Type type, string name)
+        {
+            if (type == null || string.IsNullOrEmpty(name)) return null;
+            return _tickMiCache.GetOrAdd((type, name),
+                key => key.Type.GetMethod(key.Name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic));
         }
 
         // Unified prefix for any periodic hub (instance or static).
@@ -1156,7 +1604,8 @@ namespace MapPerfProbe
             if (string.IsNullOrEmpty(name)) return true;
             if (!IsPeriodic(__originalMethod)) return true;
             if (string.Equals(name, "HourlyTick", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(name, "OnHourlyTick", StringComparison.OrdinalIgnoreCase))
+                || string.Equals(name, "OnHourlyTick", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "WeeklyTick", StringComparison.OrdinalIgnoreCase))
                 return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
             var handled = PeriodicSlicer.RedirectAny(__instance, __originalMethod, name);
