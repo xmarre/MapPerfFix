@@ -11,6 +11,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Runtime.CompilerServices;
 using System.Text;
+using HarmonyLib;
 using TaleWorlds.CampaignSystem;
 using TaleWorlds.Core;
 using TaleWorlds.MountAndBlade;
@@ -384,9 +385,7 @@ namespace MapPerfProbe
                         harmony,
                         "TaleWorlds.CampaignSystem.Campaign",
                         new[] { "DailyTick" },
-                        typeof(SubModule).GetMethod(nameof(DeferCampaignDailyTick_Prefix), HookBindingFlags),
-                        null,
-                        null));
+                        typeof(SubModule).GetMethod(nameof(DeferCampaignDailyTick_Prefix), HookBindingFlags)));
                 SafePatch("Slice CampaignEvents Daily/Hourly",
                     () =>
                     {
@@ -1510,7 +1509,10 @@ namespace MapPerfProbe
                 if (ft == null) continue;
                 if (!typeof(IEnumerable).IsAssignableFrom(ft)) continue;
                 if (IsDictionaryLike(ft)) continue;
-                if (field.GetValue(dispatcher) is not IEnumerable en) continue;
+                var fieldValue = field.GetValue(dispatcher);
+                if (fieldValue == null) continue;
+                var en = fieldValue as IEnumerable;
+                if (en == null) continue;
                 foreach (var beh in en)
                     yield return beh;
             }
