@@ -1,8 +1,6 @@
-using System;
 using MCM.Abstractions.Attributes;
 using MCM.Abstractions.Attributes.v2;
 using MCM.Abstractions.Base.Global;
-using MCM.Abstractions.Dropdowns;
 
 namespace MapPerfProbe
 {
@@ -15,6 +13,7 @@ namespace MapPerfProbe
         public override string FolderName => "MapPerfProbe";
         public override string FormatType => "json";
 
+        // --- General ---
         [SettingPropertyGroup("General", GroupOrder = 0)]
         [SettingPropertyBool("Debug Logging", RequireRestart = false, Order = 0)]
         public bool DebugLogging { get; set; } = false;
@@ -27,18 +26,22 @@ namespace MapPerfProbe
         [SettingPropertyBool("Throttle Only In Fast-Forward", Order = 1)]
         public bool ThrottleOnlyInFastTime { get; set; } = true;
 
-        // MCM v5: use Dropdown<T> instead of SettingPropertyEnum
+        // NOTE: To stay compatible with all MCM v5 variants (no Dropdown<T> / no SettingPropertyEnum),
+        // expose an integer and map it to the enum.
         [SettingPropertyGroup("Map Throttle", GroupOrder = 1)]
-        [SettingPropertyDropdown("Preset", Order = 2)]
-        public Dropdown<ThrottlePreset> PresetOption { get; set; } =
-            new Dropdown<ThrottlePreset>(
-                (ThrottlePreset[])Enum.GetValues(typeof(ThrottlePreset)),
-                (int)ThrottlePreset.Balanced
-            );
+        [SettingPropertyInteger("Preset (0=Off, 1=Balanced, 2=Aggressive)", 0, 2,
+            Order = 2, RequireRestart = false)]
+        public int PresetIndex { get; set; } = (int)ThrottlePreset.Balanced;
 
-        // Convenience getter for code usage
-        public ThrottlePreset Preset =>
-            (PresetOption?.SelectedValue) ?? ThrottlePreset.Balanced;
+        // Convenience enum view for the rest of the codebase
+        public ThrottlePreset Preset
+        {
+            get
+            {
+                var clamped = PresetIndex < 0 ? 0 : (PresetIndex > 2 ? 2 : PresetIndex);
+                return (ThrottlePreset) clamped;
+            }
+        }
 
         // -------- Message Filters ----------
         [SettingPropertyGroup("Message Filters", GroupOrder = 10)]
