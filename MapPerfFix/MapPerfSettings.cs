@@ -1,6 +1,9 @@
+using System;
+using System.Linq;
 using MCM.Abstractions.Attributes;
 using MCM.Abstractions.Attributes.v2;
 using MCM.Abstractions.Base.Global;
+using MCM.Abstractions.Dropdowns;
 
 namespace MapPerfProbe
 {
@@ -25,9 +28,18 @@ namespace MapPerfProbe
         [SettingPropertyBool("Throttle Only In Fast-Forward", Order = 1)]
         public bool ThrottleOnlyInFastTime { get; set; } = true;
 
+        // MCM v5: use Dropdown<T> instead of SettingPropertyEnum
         [SettingPropertyGroup("Map Throttle", GroupOrder = 1)]
-        [SettingPropertyEnum("Preset", Order = 2)]
-        public ThrottlePreset Preset { get; set; } = ThrottlePreset.Balanced;
+        [SettingPropertyDropdown("Preset", Order = 2)]
+        public Dropdown<ThrottlePreset> PresetOption { get; set; } =
+            new Dropdown<ThrottlePreset>(
+                Enum.GetValues(typeof(ThrottlePreset)).Cast<ThrottlePreset>().ToArray(),
+                (int)ThrottlePreset.Balanced
+            );
+
+        // Convenience getter for code usage
+        public ThrottlePreset Preset =>
+            (PresetOption?.SelectedValue) ?? ThrottlePreset.Balanced;
 
         // -------- Message Filters ----------
         [SettingPropertyGroup("Message Filters", GroupOrder = 10)]
