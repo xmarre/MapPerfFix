@@ -91,10 +91,10 @@
     <Reference Include="TaleWorlds.TwoDimension">
       <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.TwoDimension.dll</HintPath>
     </Reference>
-    <Reference Include="MCM.Abstractions">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\Modules\MCMv5\bin\Win64_Shipping_Client\MCM.Abstractions.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Compile-time only; do not copy MCM into your mod output -->
+    <PackageReference Include="Bannerlord.MCM" Version="5.10.1" IncludeAssets="compile" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="MapPerfConfig.cs" />
