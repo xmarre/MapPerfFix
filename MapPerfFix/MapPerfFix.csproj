@@ -16,7 +16,9 @@
     <PlatformTarget>x64</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
-  <PropertyGroup><RestoreProjectStyle>PackageReference</RestoreProjectStyle></PropertyGroup>
+  <PropertyGroup>
+    <RestoreProjectStyle>PackageReference</RestoreProjectStyle>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
     <DebugSymbols>true</DebugSymbols>
     <OutputPath>bin\x64\Debug\</OutputPath>
@@ -91,11 +93,6 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
-    <!-- Compile-time only: lets MCM v5 attributes & Dropdown<T> resolve without bundling MCM -->
-    <!-- Dropdown<T> lives in MCM 5.12+ -->
-    <PackageReference Include="Bannerlord.MCM" Version="5.12.1" IncludeAssets="compile" />
-  </ItemGroup>
-  <ItemGroup>
     <Compile Include="MapPerfConfig.cs" />
     <Compile Include="MapPerfLog.cs" />
     <Compile Include="MapPerfSettings.cs" />
@@ -109,6 +106,11 @@
   <ItemGroup>
     <None Include="AGENTS.md" />
     <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Bannerlord.MCM">
+      <Version>5.10.1</Version>
+    </PackageReference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>
