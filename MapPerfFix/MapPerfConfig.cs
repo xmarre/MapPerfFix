@@ -40,6 +40,7 @@ namespace MapPerfProbe
         internal static int MaxDesyncMs => Get(s => s.MaxDesyncMs, 1000);
         internal static int DesyncLowWatermarkMs => Get(s => s.DesyncLowWatermarkMs, 400);
         internal static ThrottlePreset Preset => Get(s => s.Preset, ThrottlePreset.Balanced);
+        internal static int PeriodicQueueHardCap => Get(s => s.PeriodicQueueHardCap, 150);
 
         // Fixed internals (kept sane; not exposed)
         internal static double BudgetAlpha => 0.05;

@@ -118,6 +118,8 @@ namespace MapPerfProbe
         private const int SlowLogPruneLimit = 2_048;
         private const double SlowLogPruneIntervalSeconds = 30.0;
         private const double SlowLogRetainSeconds = 30.0;
+        private static double _recentOverBudgetUntilSec;
+        private static int HardNoEnqueueQLen => MapPerfConfig.PeriodicQueueHardCap;
         private static double _drainBoostUntilSec;
         private static Type _campaignBehaviorManagerType;
         private static PropertyInfo _campaignBehaviorManagerProp;
@@ -131,6 +133,37 @@ namespace MapPerfProbe
             var until = NowSec() + dur;
             Volatile.Write(ref _drainBoostUntilSec, until);
         }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool ShouldDeferPeriodic(MethodBase hub)
+        {
+            PeriodicSlicer.GetQueueStats(out var queueLength, out _, out _);
+            if (queueLength >= HardNoEnqueueQLen) return false;
+
+            // Continuations/drain use null hub – keep draining while backlog exists.
+            if (hub == null)
+                return queueLength > 0;
+
+            if (!MapPerfConfig.EnableMapThrottle) return false;
+            if (!IsOnMap()) return false;
+
+            var recent = NowSec() < Volatile.Read(ref _recentOverBudgetUntilSec);
+            return Volatile.Read(ref _overBudgetStreak) > 0 || recent;
+        }
+
+        // Global enqueue gate for PeriodicSlicer
+        internal static bool MayEnqueueNow()
+        {
+            PeriodicSlicer.GetQueueStats(out var qlen, out _, out _);
+            if (qlen >= HardNoEnqueueQLen) return false;
+            if (qlen > 0) return true;
+            if (!MapPerfConfig.EnableMapThrottle || !IsOnMap()) return false;
+
+            var recent = NowSec() < Volatile.Read(ref _recentOverBudgetUntilSec);
+            return recent || Volatile.Read(ref _overBudgetStreak) > 0;
+        }
+
+        internal static int MaxQueueForEnqueue => HardNoEnqueueQLen;
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool ShouldLogSlow(string key, double windowSec = 5.0)
         {
@@ -541,6 +574,8 @@ namespace MapPerfProbe
         {
             var prevMode = _lastFrameMode;
             _lastFrameMode = nextMode;
+            Volatile.Write(ref _recentOverBudgetUntilSec, 0.0);
+            Interlocked.Exchange(ref _overBudgetStreak, 0);
             Stats.Clear();
             RootAgg.Clear();
             AllocBuckets.Clear();
@@ -924,6 +959,13 @@ namespace MapPerfProbe
                         FlushSummary(force: false);
                 }
 
+                if (overBudget)
+                {
+                    var dtMs = frameMs;
+                    var hysteresisSec = Math.Min(1.0, 0.3 + 2.0 * (dtMs / 1000.0));
+                    Volatile.Write(ref _recentOverBudgetUntilSec, NowSec() + hysteresisSec);
+                }
+
                 // Drain queue
                 PeriodicSlicer.GetQueueStats(out var queueLength, out _, out _);
 
@@ -1272,8 +1314,7 @@ namespace MapPerfProbe
         private static bool DeferCampaignDailyTick_Prefix(object __instance, MethodBase __originalMethod)
         {
             if (!MapPerfConfig.Enabled) return true;
-            if (!IsOnMap()) return true;
-            if (!FastSnapshot && Volatile.Read(ref _overBudgetStreak) <= 0) return true;
+            if (!ShouldDeferPeriodic(__originalMethod)) return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
 
             var target = __instance;
@@ -1308,6 +1349,7 @@ namespace MapPerfProbe
         {
             if (__originalMethod == null) return true;
             if (!MapPerfConfig.Enabled) return true;
+            if (!ShouldDeferPeriodic(__originalMethod)) return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
             var name = __originalMethod?.Name ?? string.Empty;
             // Split the dispatcher hub: handle exact names on .NET 4.7.2
@@ -1325,6 +1367,8 @@ namespace MapPerfProbe
         public static bool OnHourlyTick_Prefix(object __instance, MethodBase __originalMethod)
         {
             if (__originalMethod == null) return true;
+            if (!MapPerfConfig.Enabled) return true;
+            if (!ShouldDeferPeriodic(__originalMethod)) return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
 
             long hourNow;
@@ -1355,6 +1399,7 @@ namespace MapPerfProbe
         {
             if (__originalMethod == null) return true;
             if (!MapPerfConfig.Enabled) return true;
+            if (!ShouldDeferPeriodic(__originalMethod)) return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
             if (SplitAndEnqueueDispatcherChildren(__instance, "WeeklyTick", __originalMethod, isWeekly: true))
                 return false;
@@ -1368,6 +1413,9 @@ namespace MapPerfProbe
         {
             try
             {
+                if (!ShouldDeferPeriodic(hub)) return false;
+                PeriodicSlicer.GetQueueStats(out var queueLength, out _, out _);
+                if (queueLength >= HardNoEnqueueQLen) return false;
                 var behaviors = CollectUniqueBehaviors(dispatcher);
                 var count = behaviors.Count;
                 if (count == 0) return false;
@@ -1691,6 +1739,10 @@ namespace MapPerfProbe
             var name = __originalMethod?.Name;
             if (string.IsNullOrEmpty(name)) return true;
             if (!IsPeriodic(__originalMethod)) return true;
+            // 🚫 never enqueue unless we’re truly in/near lag
+            if (!ShouldDeferPeriodic(__originalMethod))
+                return true; // run inline (no redirect/enqueue)
+
             if (string.Equals(name, "HourlyTick", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(name, "OnHourlyTick", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(name, "WeeklyTick", StringComparison.OrdinalIgnoreCase))
@@ -1704,6 +1756,10 @@ namespace MapPerfProbe
         {
             if (__originalMethod == null) return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
+            // 🚫 only defer when a frame actually went over budget (or just after)
+            if (!ShouldDeferPeriodic(__originalMethod))
+                return true; // run inline
+
             if (PausedSnapshot)
             {
                 Interlocked.Exchange(ref _childBacklogToken, 0);
@@ -3779,6 +3835,9 @@ namespace MapPerfProbe
         private static readonly ConcurrentDictionary<HandlerKey, long> _recentFireUntil
             = new ConcurrentDictionary<HandlerKey, long>();
         private const double HubRepeatTtlSec = 0.5;
+        private static int _gateRejects;
+        private static int _capRejects;
+        private static long _nextGateLogTs;
         private static long _nextPumpLogTs;
         private static long _nextQueuedHandlersLogTs;
         private static long _nextQueuePressureLogTs;
@@ -3794,6 +3853,7 @@ namespace MapPerfProbe
         private const double QueuePressureCooldownSeconds = 0.5;
         private const int QueuePressureThreshold = 15_000;
         private const double QueueDropLogCooldownSeconds = 0.5;
+        private const double GateLogIntervalSeconds = 10.0;
         private const int QueueBackpressureHeadroomDefault = 512;
         private const int QueueBackpressureHeadroomFast = 1_024;
         private const int QueueBackpressureHeadroomPaused = 256;
@@ -4166,6 +4226,18 @@ namespace MapPerfProbe
 
         public static bool RedirectAny(object instance, MethodBase original, string methodName, Action onComplete = null)
         {
+            if (!SubModule.MayEnqueueNow())
+            {
+                NoteGateReject();
+                return false;
+            }
+            GetQueueStats(out var qlenGate, out _, out _);
+            if (qlenGate >= SubModule.MaxQueueForEnqueue)
+            {
+                NoteCapReject();
+                return false;
+            }
+
             if (instance != null)
                 return Redirect(instance, original, methodName, onComplete);
             var t = original?.DeclaringType;
@@ -4176,6 +4248,17 @@ namespace MapPerfProbe
         internal static bool EnqueueAction(Action action)
         {
             if (action == null) return false;
+            if (!SubModule.MayEnqueueNow())
+            {
+                NoteGateReject();
+                return false;
+            }
+            GetQueueStats(out var qlen, out _, out _);
+            if (qlen >= SubModule.MaxQueueForEnqueue)
+            {
+                NoteCapReject();
+                return false;
+            }
 
             int count;
             lock (_lock)
@@ -4197,6 +4280,17 @@ namespace MapPerfProbe
         private static bool EnqueueBatch(List<Action> actions, string name, Action onComplete = null)
         {
             if (actions == null || actions.Count == 0) return false;
+            if (!SubModule.MayEnqueueNow())
+            {
+                NoteGateReject();
+                return false;
+            }
+            GetQueueStats(out var qlen, out _, out _);
+            if (qlen >= SubModule.MaxQueueForEnqueue)
+            {
+                NoteCapReject();
+                return false;
+            }
 
             var thunk = new BatchThunk(actions, name, onComplete);
             if (!EnqueueAction(thunk.Run))
@@ -4343,6 +4437,17 @@ namespace MapPerfProbe
         internal static bool EnqueueActionWithBypass(MethodBase method, Action action)
         {
             if (action == null) return false;
+            if (!SubModule.MayEnqueueNow())
+            {
+                NoteGateReject();
+                return false;
+            }
+            GetQueueStats(out var qlen, out _, out _);
+            if (qlen >= SubModule.MaxQueueForEnqueue)
+            {
+                NoteCapReject();
+                return false;
+            }
 
             return EnqueueAction(() =>
             {
@@ -4423,10 +4528,46 @@ namespace MapPerfProbe
                 finally { second?.Invoke(); }
             };
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void NoteGateReject() => Interlocked.Increment(ref _gateRejects);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void NoteCapReject() => Interlocked.Increment(ref _capRejects);
+
+        private static void MaybeLogGateStats()
+        {
+            var now = Stopwatch.GetTimestamp();
+            var next = Volatile.Read(ref _nextGateLogTs);
+            if (now < next) return;
+            if (Interlocked.CompareExchange(
+                    ref _nextGateLogTs,
+                    now + (long)(Stopwatch.Frequency * GateLogIntervalSeconds),
+                    next) != next)
+                return;
+
+            var gate = Interlocked.Exchange(ref _gateRejects, 0);
+            var cap = Interlocked.Exchange(ref _capRejects, 0);
+            if (gate == 0 && cap == 0) return;
+
+            MapPerfLog.Debug($"[slice] gate rejects={gate} cap rejects={cap}");
+        }
+
         private static bool Redirect(object dispatcher, MethodBase hub, string methodName, Action onComplete = null)
         {
             try
             {
+                if (!SubModule.MayEnqueueNow())
+                {
+                    NoteGateReject();
+                    return false;
+                }
+                GetQueueStats(out var qlenGate, out _, out _);
+                if (qlenGate >= SubModule.MaxQueueForEnqueue)
+                {
+                    NoteCapReject();
+                    return false;
+                }
+
                 if (dispatcher == null) return false;
                 if (hub != null && IsSimulationCritical(hub))
                     return false;
@@ -4525,6 +4666,18 @@ namespace MapPerfProbe
         {
             try
             {
+                if (!SubModule.MayEnqueueNow())
+                {
+                    NoteGateReject();
+                    return false;
+                }
+                GetQueueStats(out var qlenGate, out _, out _);
+                if (qlenGate >= SubModule.MaxQueueForEnqueue)
+                {
+                    NoteCapReject();
+                    return false;
+                }
+
                 if (hubType == null) return false;
                 var hubKey = (MethodBase)original
                                ?? (MethodBase)hubType.GetMethod(methodName,
@@ -4635,6 +4788,8 @@ namespace MapPerfProbe
 
         public static void Pump(double msBudget)
         {
+            MaybeLogGateStats();
+
             if (msBudget <= 0.0) return;
 
             if (Stopwatch.GetTimestamp() < Volatile.Read(ref _pumpCooldownUntil))
