@@ -31,9 +31,14 @@ namespace MapPerfProbe
             return fallback;
         }
 
+        internal static bool Enabled => Get(s => s.Enabled, true);
         internal static bool DebugLogging => Get(s => s.DebugLogging, false);
         internal static bool EnableMapThrottle => Get(s => s.EnableMapThrottle, true);
         internal static bool ThrottleOnlyInFastTime => Get(s => s.ThrottleOnlyInFastTime, true);
+        internal static bool DesyncSimWhileThrottling => Get(s => s.DesyncSimWhileThrottling, true);
+        internal static int SimTickEveryNSkipped => Get(s => s.SimTickEveryNSkipped, 8);
+        internal static int MaxDesyncMs => Get(s => s.MaxDesyncMs, 1000);
+        internal static int DesyncLowWatermarkMs => Get(s => s.DesyncLowWatermarkMs, 400);
         internal static ThrottlePreset Preset => Get(s => s.Preset, ThrottlePreset.Balanced);
 
         // Fixed internals (kept sane; not exposed)
