@@ -37,9 +37,11 @@
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="0Harmony">
-      <HintPath>packages\Lib.Harmony.2.4.1\lib\net472\0Harmony.dll</HintPath>
-      <Private>True</Private>
+    <Reference Include="0Harmony, Version=2.2.2.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\Bannerlord.Lib.Harmony.2.2.2\lib\net472\0Harmony.dll</HintPath>
+    </Reference>
+    <Reference Include="MCMv5, Version=5.10.1.0, Culture=neutral, processorArchitecture=AMD64">
+      <HintPath>..\packages\Bannerlord.MCM.5.10.1\lib\netstandard2.0\MCMv5.dll</HintPath>
     </Reference>
     <Reference Include="System" />
     <Reference Include="TaleWorlds.ActivitySystem">
