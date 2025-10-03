@@ -22,6 +22,7 @@ namespace MapPerfProbe
     public class SubModule : MBSubModuleBase
     {
         private const string HId = "mmq.mapperfprobe";
+        internal static string HarmonyId => HId;
         private static readonly ConcurrentDictionary<MethodBase, PerfStat> Stats = new ConcurrentDictionary<MethodBase, PerfStat>();
         private static bool _didPatch;
         private static readonly ConcurrentDictionary<MethodBase, double> _allocCd =
@@ -149,8 +150,7 @@ namespace MapPerfProbe
             if (!MapPerfConfig.EnableMapThrottle) return false;
             if (!IsOnMap()) return false;
 
-            var recent = NowSec() < Volatile.Read(ref _recentOverBudgetUntilSec);
-            return Volatile.Read(ref _overBudgetStreak) > 0 || recent;
+            return HotOrRecent();
         }
 
         // Global enqueue gate for PeriodicSlicer
@@ -161,13 +161,18 @@ namespace MapPerfProbe
             if (qlen > 0) return true;
             if (!MapPerfConfig.EnableMapThrottle || !IsOnMap()) return false;
 
-            var recent = NowSec() < Volatile.Read(ref _recentOverBudgetUntilSec);
-            return recent || Volatile.Read(ref _overBudgetStreak) > 0;
+            return HotOrRecent();
         }
 
         internal static int MaxQueueForEnqueue => HardNoEnqueueQLen;
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static bool ShouldLogSlow(string key, double windowSec = 5.0)
+        internal static bool HotOrRecent()
+        {
+            var recent = NowSec() < Volatile.Read(ref _recentOverBudgetUntilSec);
+            return Volatile.Read(ref _overBudgetStreak) > 0 || recent;
+        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool ShouldLogSlow(string key, double windowSec = 5.0)
         {
             var now = NowSec();
             var pruneDue = now >= Volatile.Read(ref _slowLogPruneNext);
@@ -387,14 +392,15 @@ namespace MapPerfProbe
 
                 try
                 {
+                    var targetAssembly = typeof(PeriodicHubDeferrer).Assembly;
                     if (harmony is HarmonyLib.Harmony typedHarmony)
                     {
-                        typedHarmony.PatchAll(typeof(MsgFilter).Assembly);
+                        typedHarmony.PatchAll(targetAssembly);
                     }
                     else
                     {
                         var patchAllMi = harmony.GetType().GetMethod("PatchAll", new[] { typeof(Assembly) });
-                        patchAllMi?.Invoke(harmony, new object[] { typeof(MsgFilter).Assembly });
+                        patchAllMi?.Invoke(harmony, new object[] { targetAssembly });
                     }
                 }
                 catch (Exception ex)
@@ -410,8 +416,8 @@ namespace MapPerfProbe
                     catch { /* best-effort on Mono/older runtimes */ }
                 }
 
-                // IMPORTANT: throttle patch must be applied before broad instrumentation,
-                // so its bool-prefix can skip the original when needed.
+                // IMPORTANT: after bootstrapping the deferrer assembly, apply the throttle patch
+                // before broader instrumentation so its bool-prefix can skip the original when needed.
                 SafePatch("PatchMapScreenThrottle", () => PatchMapScreenThrottle(harmony));
 
                 // High-level map/UI hooks (already working)
@@ -685,7 +691,7 @@ namespace MapPerfProbe
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static double ReadLastFrameMsSnap() => Interlocked.CompareExchange(ref _lastFrameMsSnap, 0.0, 0.0);
+        internal static double ReadLastFrameMsSnap() => Interlocked.CompareExchange(ref _lastFrameMsSnap, 0.0, 0.0);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static void WriteLastFrameMsSnap(double value) => Interlocked.Exchange(ref _lastFrameMsSnap, value);
@@ -3735,7 +3741,7 @@ namespace MapPerfProbe
             }
         }
 
-        private static bool IsOnMap()
+        internal static bool IsOnMap()
         {
             try
             {
