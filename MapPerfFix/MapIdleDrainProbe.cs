@@ -43,6 +43,7 @@ namespace MapPerfProbe
         private static long _mapFrameStart;
         private static long _uiStart;
         private static long _frames;
+        private static long _uiFrames;
         private static double _accMapFrameMs;
         private static double _maxMapFrameMs;
         private static double _accUiMs;
@@ -155,6 +156,7 @@ namespace MapPerfProbe
         private static void ResetWindow()
         {
             _frames = 0;
+            _uiFrames = 0;
             _accMapFrameMs = 0.0;
             _maxMapFrameMs = 0.0;
             _accUiMs = 0.0;
@@ -236,6 +238,9 @@ namespace MapPerfProbe
             var dtMs = (Stopwatch.GetTimestamp() - start) * TicksToMs;
             _accUiMs += dtMs;
             if (dtMs > _maxUiMs) _maxUiMs = dtMs;
+            _uiFrames++;
+            // also sample world state during UI-only windows so world counts are non-zero
+            SampleWorldState(null);
             MaybeReport();
         }
 
@@ -286,14 +291,19 @@ namespace MapPerfProbe
 
         private static void MaybeReport()
         {
+            if (_frames == 0 && _uiFrames == 0) return;
+
             var nowSec = Stopwatch.GetTimestamp() * TicksToSeconds;
             if (_nextReportSec == 0.0) _nextReportSec = nowSec + ReportIntervalSeconds;
             if (nowSec < _nextReportSec) return;
             _nextReportSec = nowSec + ReportIntervalSeconds;
 
-            var frameCount = Math.Max(1L, _frames);
-            var avgMapMs = _accMapFrameMs / frameCount;
-            var avgUiMs = _accUiMs / frameCount;
+            var mapFrames = _frames;
+            var uiFrames = _uiFrames;
+            var mapCount = Math.Max(1L, mapFrames);
+            var uiCount = Math.Max(1L, uiFrames);
+            var avgMapMs = _accMapFrameMs / mapCount;
+            var avgUiMs = _accUiMs / uiCount;
             var avgParties = _samples > 0 ? (double)_sumParties / _samples : 0.0;
             var avgArmies = _samples > 0 ? (double)_sumArmies / _samples : 0.0;
             var avgSettlements = _samples > 0 ? (double)_sumSettlements / _samples : 0.0;
@@ -315,11 +325,11 @@ namespace MapPerfProbe
 
             var mode = Campaign.Current?.TimeControlMode.ToString() ?? "<none>";
 
-            PublishSnapshot(frameCount, avgMapMs, _maxMapFrameMs, avgUiMs, _maxUiMs,
+            PublishSnapshot(mapFrames, avgMapMs, _maxMapFrameMs, avgUiMs, _maxUiMs,
                 avgParties, avgArmies, avgSettlements, avgTracks, d0, d1, d2, ws, deltaWs, mode);
 
             MapPerfLog.Info(
-                $"[idle-probe] mode={mode} frames={frameCount} avg_map_ms={avgMapMs:F2} max_map_ms={_maxMapFrameMs:F2} avg_ui_ms={avgUiMs:F2} max_ui_ms={_maxUiMs:F2} | world≈ parties={avgParties:F0} armies={avgArmies:F0} settlements={avgSettlements:F0} tracks={avgTracks:F0} | GCΔ G0={d0} G1={d1} G2={d2} | WS={ws}MB (Δ{deltaWs}MB)");
+                $"[idle-probe] mode={mode} frames={mapFrames} avg_map_ms={avgMapMs:F2} max_map_ms={_maxMapFrameMs:F2} avg_ui_ms={avgUiMs:F2} max_ui_ms={_maxUiMs:F2} | world≈ parties={avgParties:F0} armies={avgArmies:F0} settlements={avgSettlements:F0} tracks={avgTracks:F0} | GCΔ G0={d0} G1={d1} G2={d2} | WS={ws}MB (Δ{deltaWs}MB)");
 
             ResetWindow();
         }
