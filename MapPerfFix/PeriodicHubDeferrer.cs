@@ -217,12 +217,17 @@ namespace MapPerfProbe
                 }
             };
 
-            bool enq = PeriodicSlicer.EnqueueAction(action);
+            var name = __originalMethod.Name ?? string.Empty;
+            var slow = name.IndexOf("DailyTick", StringComparison.Ordinal) >= 0
+                       || name.IndexOf("Weekly", StringComparison.Ordinal) >= 0
+                       || name.IndexOf("TickPartialHourlyAi", StringComparison.Ordinal) >= 0
+                       || name.IndexOf("AiHourlyTick", StringComparison.Ordinal) >= 0;
+            bool enq = slow ? PeriodicSlicer.EnqueueSlowAction(action) : PeriodicSlicer.EnqueueAction(action);
             if (!enq)
             {
                 PeriodicSlicer.Pump(SubModule.FastSnapshot ? 3.0 : 2.0);
                 if (SubModule.MayEnqueueNow())
-                    enq = PeriodicSlicer.EnqueueAction(action);
+                    enq = slow ? PeriodicSlicer.EnqueueSlowAction(action) : PeriodicSlicer.EnqueueAction(action);
             }
 
             if (!enq)

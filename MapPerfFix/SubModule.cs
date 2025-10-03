@@ -436,11 +436,17 @@ namespace MapPerfProbe
                             prefix2: typeof(SubModule).GetMethod(nameof(OnHourlyTick_Prefix), HookBindingFlags));
                     });
                 SafePatch("Defer Campaign.DailyTick core",
-                    () => TryPatchType(
-                        harmony,
-                        "TaleWorlds.CampaignSystem.Campaign",
-                        new[] { "DailyTick" },
-                        typeof(SubModule).GetMethod(nameof(DeferCampaignDailyTick_Prefix), HookBindingFlags)));
+                    () =>
+                    {
+                        var t = Type.GetType("TaleWorlds.CampaignSystem.Campaign, TaleWorlds.CampaignSystem");
+                        if (t == null) return;
+                        const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                        var mi = GetZeroParamMethod(t, "DailyTick", F);
+                        if (mi == null) return;
+                        var pre = typeof(SubModule).GetMethod(nameof(DeferCampaignDailyTick_Prefix), HookBindingFlags);
+                        var hm = new HarmonyMethod(pre);
+                        harmony.Patch(mi, hm);
+                    });
                 SafePatch("Slice CampaignEvents Daily/Hourly",
                     () =>
                     {
@@ -1355,7 +1361,7 @@ namespace MapPerfProbe
             }
         }
 
-        private static bool DeferCampaignDailyTick_Prefix(object __instance, MethodBase __originalMethod)
+        private static bool DeferCampaignDailyTick_Prefix(object __instance, MethodBase __originalMethod, object[] __args)
         {
             if (!MapPerfConfig.Enabled) return true;
             if (!ShouldDeferPeriodic(__originalMethod)) return true;
@@ -1363,10 +1369,16 @@ namespace MapPerfProbe
 
             var target = __instance;
             var mi = __originalMethod as MethodInfo;
-            if (!PeriodicSlicer.EnqueueActionWithBypass(__originalMethod, () =>
+            if (!PeriodicSlicer.EnqueueSlowAction( // heavy → slow lane
+            () =>
             {
+                PeriodicSlicer.EnterBypass(__originalMethod);
                 var sw = Stopwatch.StartNew();
-                try { mi?.Invoke(target, null); }
+                try
+                {
+                    var args = (__args != null && __args.Length > 0) ? __args : null;
+                    mi?.Invoke(target, args);
+                }
                 catch (Exception ex)
                 {
                     const string excKey = "exc:Campaign.DailyTick";
@@ -1382,6 +1394,7 @@ namespace MapPerfProbe
                         if (ShouldLogSlow(slowKey))
                             MapPerfLog.Warn($"[slow-job] Campaign.DailyTick took {sw.Elapsed.TotalMilliseconds:F1} ms");
                     }
+                    PeriodicSlicer.ExitBypass(__originalMethod);
                 }
             }))
                 return true;
@@ -1968,6 +1981,17 @@ namespace MapPerfProbe
             MethodInfo Lookup(string name)
             {
                 if (name == null) return null;
+
+                try
+                {
+                    foreach (var m in type.GetMethods(flags))
+                        if (m.Name == name && m.GetParameters().Length == 0)
+                            return m;
+                }
+                catch
+                {
+                    // ignored: fall back to slower base-type walk
+                }
 
                 for (var search = type; search != null && search != typeof(object); search = search.BaseType)
                 {
@@ -3854,6 +3878,7 @@ namespace MapPerfProbe
         // Sliced handlers drained under a small per-frame budget
         private static readonly Queue<Action> _qHandlers = new Queue<Action>(4096);
         private static readonly object _lock = new object();
+        private static readonly Queue<Action> _qHandlersSlow = new Queue<Action>(); // heavy lane
         private const int MaxQueued = 20000;
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<MethodBase, int> _bypass
             = new System.Collections.Concurrent.ConcurrentDictionary<MethodBase, int>();
@@ -4290,6 +4315,14 @@ namespace MapPerfProbe
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static bool EnqueueAction(Action action)
+            => TryEnqueue(action, _qHandlers);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static bool EnqueueSlowAction(Action action)
+            => TryEnqueue(action, _qHandlersSlow);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool TryEnqueue(Action action, Queue<Action> queue)
         {
             if (action == null) return false;
             if (!SubModule.MayEnqueueNow())
@@ -4304,20 +4337,21 @@ namespace MapPerfProbe
                 return false;
             }
 
-            int count;
+            int total;
             lock (_lock)
             {
-                if (_qHandlers.Count >= MaxQueued)
+                var combined = _qHandlers.Count + _qHandlersSlow.Count;
+                if (combined >= MaxQueued)
                 {
                     TryLogQueueDrop(1);
                     return false;
                 }
-                _qHandlers.Enqueue(action);
-                count = _qHandlers.Count;
+                queue.Enqueue(action);
+                total = combined + 1;
             }
 
-            if (count >= QueuePressureThreshold)
-                TryLogQueuePressure_NoLock(count);
+            if (total >= QueuePressureThreshold)
+                TryLogQueuePressure_NoLock(total);
             return true;
         }
 
@@ -4337,7 +4371,13 @@ namespace MapPerfProbe
             }
 
             var thunk = new BatchThunk(actions, name, onComplete);
-            if (!EnqueueAction(thunk.Run))
+            bool isHeavy = !string.IsNullOrEmpty(name) &&
+                           (name.IndexOf("Daily", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            name.IndexOf("Weekly", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            name.IndexOf("TickPartialHourlyAi", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            name.IndexOf("AiHourlyTick", StringComparison.OrdinalIgnoreCase) >= 0);
+            var enqueuedOk = isHeavy ? EnqueueSlowAction(thunk.Run) : EnqueueAction(thunk.Run);
+            if (!enqueuedOk)
             {
                 TryLogQueueDrop(actions.Count);
                 thunk.Abort();
@@ -4365,7 +4405,7 @@ namespace MapPerfProbe
             {
                 lock (_lock)
                 {
-                    return _qHandlers.Count;
+                    return _qHandlers.Count + _qHandlersSlow.Count;
                 }
             }
         }
@@ -4375,7 +4415,7 @@ namespace MapPerfProbe
         {
             lock (_lock)
             {
-                var count = _qHandlers.Count;
+                var count = _qHandlers.Count + _qHandlersSlow.Count;
                 GetQueueBackpressureThresholds(out var enterThreshold, out var exitThreshold);
                 if (_queueBackpressureLatched)
                 {
@@ -4402,7 +4442,7 @@ namespace MapPerfProbe
         {
             lock (_lock)
             {
-                length = _qHandlers.Count;
+                length = _qHandlers.Count + _qHandlersSlow.Count;
                 GetQueueBackpressureThresholds(out var enterThreshold, out var exitThreshold);
                 var latched = _queueBackpressureLatched;
                 if (latched)
@@ -4429,7 +4469,7 @@ namespace MapPerfProbe
         {
             lock (_lock)
             {
-                length = _qHandlers.Count;
+                length = _qHandlers.Count + _qHandlersSlow.Count;
                 GetQueueBackpressureThresholds(out var enterThreshold, out var exitThreshold);
                 backpressureThreshold = _queueBackpressureLatched ? exitThreshold : enterThreshold;
                 capacity = MaxQueued;
@@ -4806,7 +4846,7 @@ namespace MapPerfProbe
         {
             lock (_lock)
             {
-                if (_qHandlers.Count != 0)
+                if (_qHandlers.Count != 0 || _qHandlersSlow.Count != 0)
                     return;
                 _queueBackpressureLatched = false;
                 SubModule.ResetChildBackpressureCounters();
@@ -4828,6 +4868,7 @@ namespace MapPerfProbe
             _hourlyInFlight.Clear();
             _batchInFlight.Clear();
             _recentFireUntil.Clear();
+            lock (_lock) { _qHandlersSlow.Clear(); } // clear slow lane too
         }
 
         public static void Pump(double msBudget)
@@ -4856,6 +4897,8 @@ namespace MapPerfProbe
                 : (SubModule.FastSnapshot ? 8.0 : 3.5);
             var pumpedCap = SubModule.PausedSnapshot ? 0
                 : (SubModule.FastSnapshot ? Math.Min(6, 2 + Math.Max(1, QueueLength) / 400) : 3);
+            if (SubModule.FastSnapshot && QueueLength >= 2000)
+                pumpedCap = Math.Min(pumpedCap, 2);
             long overshoot = 0;
             var pumpHeadroomTicks = (long)(2.0 * SubModule.MsToTicks);
             string exitReason = string.Empty;
@@ -4877,22 +4920,53 @@ namespace MapPerfProbe
                         }
                         lock (_lock)
                         {
-                            if (_qHandlers.Count == 0)
+                            // pick lane: in fast-time never start slow-lane items
+                            if (SubModule.FastSnapshot)
                             {
-                                exitReason = "empty";
-                                break;
+                                if (_qHandlers.Count > 0)
+                                {
+                                    action = _qHandlers.Dequeue();
+                                }
+                                else
+                                {
+                                    exitReason = "slow-defer-fast";
+                                    break;
+                                }
                             }
-                            action = _qHandlers.Dequeue();
+                            else
+                            {
+                                if (_qHandlersSlow.Count > 0)
+                                {
+                                    action = _qHandlersSlow.Dequeue();
+                                }
+                                else if (_qHandlers.Count > 0)
+                                {
+                                    action = _qHandlers.Dequeue();
+                                }
+                                else
+                                {
+                                    exitReason = "empty";
+                                    break;
+                                }
+                            }
                         }
 
-                        var before = Stopwatch.GetTimestamp();
+                        var aStart = Stopwatch.GetTimestamp();
                         try { action(); }
                         catch (Exception ex) { MapPerfLog.Error("[slice] pumped action failed", ex); }
-                        var tookMs = (Stopwatch.GetTimestamp() - before) * SubModule.TicksToMs;
+                        var aTicks = Stopwatch.GetTimestamp() - aStart;
+                        var tookMs = aTicks * SubModule.TicksToMs;
                         if (SubModule.FastSnapshot && tookMs > 3.0)
                             MapPerfLog.Debug($"[slice] long action {tookMs:F1} ms (fast)");
                         pumped++;
                         budget -= Math.Max(0.0, tookMs);
+
+                        if (SubModule.FastSnapshot && tookMs > 40.0)
+                        {
+                            // back off further pumping this frame to avoid 50–800 ms overshoots
+                            exitReason = "slow-item";
+                            break;
+                        }
 
                         if (budget <= 0.0)
                         {
@@ -4920,7 +4994,7 @@ namespace MapPerfProbe
             }
 
             int remaining;
-            lock (_lock) remaining = _qHandlers.Count;
+            lock (_lock) remaining = _qHandlers.Count + _qHandlersSlow.Count;
             var now = Stopwatch.GetTimestamp();
             if (overshoot > 0)
             {
@@ -4954,6 +5028,9 @@ namespace MapPerfProbe
                     Interlocked.Increment(ref _exitHeadroom);
                     break;
                 case "empty":
+                    Interlocked.Increment(ref _exitEmpty);
+                    break;
+                case "slow-defer-fast":
                     Interlocked.Increment(ref _exitEmpty);
                     break;
                 case "budget":
@@ -5286,13 +5363,13 @@ namespace MapPerfProbe
         public static bool ShouldBypass(MethodBase m)
             => m != null && _bypass.TryGetValue(m, out var c) && c > 0;
 
-        private static void EnterBypass(MethodBase m)
+        internal static void EnterBypass(MethodBase m)
         {
             if (m == null) return;
             _bypass.AddOrUpdate(m, 1, (_, v) => v + 1);
         }
 
-        private static void ExitBypass(MethodBase m)
+        internal static void ExitBypass(MethodBase m)
         {
             if (m == null) return;
             _bypass.AddOrUpdate(m, 0, (_, v) => Math.Max(0, v - 1));
