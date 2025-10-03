@@ -6,6 +6,8 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using HarmonyLib;
 using TaleWorlds.CampaignSystem;
+using TaleWorlds.CampaignSystem.Party;
+using TaleWorlds.CampaignSystem.Settlements;
 
 namespace MapPerfProbe
 {
@@ -229,9 +231,9 @@ namespace MapPerfProbe
 
                 _samples++;
 
-                _sumParties += SafeCount(TaleWorlds.CampaignSystem.Party.MobileParty.All);
-                _sumArmies += SafeCount(TaleWorlds.CampaignSystem.Army.Armies);
-                _sumSettlements += SafeCount(TaleWorlds.CampaignSystem.Settlement.All);
+                _sumParties += SafeCount(MobileParty.All);
+                _sumArmies += CountArmies();
+                _sumSettlements += SafeCount(Settlement.All);
 
                 var tracks = EstimateTrackCount(campaign);
                 if (tracks > 0)
@@ -240,6 +242,28 @@ namespace MapPerfProbe
             catch
             {
                 // ignore – diagnostics only
+            }
+        }
+
+        private static int CountArmies()
+        {
+            try
+            {
+                var kingdoms = Kingdom.All;
+                if (kingdoms == null) return 0;
+
+                var total = 0;
+                foreach (var kingdom in kingdoms)
+                {
+                    if (kingdom == null) continue;
+                    total += SafeCount(kingdom.Armies);
+                }
+
+                return total;
+            }
+            catch
+            {
+                return 0;
             }
         }
 
