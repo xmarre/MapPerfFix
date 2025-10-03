@@ -115,6 +115,7 @@ namespace MapPerfProbe
             new ConcurrentDictionary<MethodInfo, long>();
         private static readonly ConcurrentDictionary<MethodInfo, long> _lastWeeklyIdx =
             new ConcurrentDictionary<MethodInfo, long>();
+        private static long _lastDailyGlobalIdx;
         private static readonly ConcurrentDictionary<string, double> _slowLogNext =
             new ConcurrentDictionary<string, double>();
         private static readonly ConcurrentDictionary<MethodBase, double> _slaStart =
@@ -1112,16 +1113,17 @@ namespace MapPerfProbe
                 pumpMs = Math.Min(pumpMs, fast ? PumpBudgetFastCapMs : PumpBudgetRunCapMs);
 
                 var noPumpUntil = Volatile.Read(ref _noPumpUntilSec);
-                if (paused || (noPumpUntil > 0.0 && NowSec() < noPumpUntil))
+                PeriodicSlicer.GetQueueStats(out var qlenNow, out _, out _);
+
+                if (noPumpUntil > 0.0 && NowSec() < noPumpUntil)
                 {
-                    PeriodicSlicer.GetQueueStats(out var qlenNow, out _, out _);
-                    if (!paused && qlenNow >= PumpBacklogBoostThreshold)
+                    if (qlenNow > 0)
                     {
-                        var trickleMs = Math.Min(4.0, pumpMs > 0.0 ? pumpMs : (fast ? PumpTailMinFastMs : PumpTailMinRunMs));
-                        if (trickleMs > 0.0)
-                            PeriodicSlicer.Pump(trickleMs);
+                        var trickle = Math.Min(pumpMs, FastSnapshot ? 3.0 : 2.0);
+                        if (trickle > 0.0)
+                            PeriodicSlicer.Pump(trickle);
                     }
-                    else if (!paused && ShouldLogSlow("pump-suppress", PostSpikeNoPumpSec))
+                    else if (ShouldLogSlow("pump-suppress", MapPerfConfig.PostSpikeNoPumpSec))
                     {
                         MapPerfLog.Info("[slice] pump suppressed (cooldown)");
                     }
@@ -1421,6 +1423,18 @@ namespace MapPerfProbe
         {
             Interlocked.Increment(ref _dailyPrefixHits);
             if (!MapPerfConfig.Enabled) return true;
+
+            long dayNow;
+            try { dayNow = (long)Math.Floor(CampaignTime.Now.ToDays); }
+            catch { dayNow = long.MinValue; }
+
+            if (dayNow != long.MinValue)
+            {
+                var prev = Interlocked.Read(ref _lastDailyGlobalIdx);
+                if (prev == dayNow) return false;
+                Interlocked.Exchange(ref _lastDailyGlobalIdx, dayNow);
+            }
+
             if (!ShouldDeferPeriodic(__originalMethod)) return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
 
@@ -1509,16 +1523,32 @@ namespace MapPerfProbe
                     if (mi == null) continue;
                     var target = beh;
                     var call = mi;
+                    var behType = target.GetType();
+                    var isIG = behType?.FullName?.IndexOf("ImprovedGarrison", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (isIG && hub != null)
+                    {
+                        var stamp = NowSec();
+                        _slaStart.TryAdd(hub, stamp);
+                    }
                     var enq = PeriodicSlicer.EnqueueSlowAction(() =>
                     {
+                        var fastNow = FastSnapshot;
+                        var overdue = hub != null && _slaStart.TryGetValue(hub, out var t0) && (NowSec() - t0) > 5.0;
+                        if (isIG && fastNow && !overdue)
+                            return;
+
                         PeriodicSlicer.EnterBypass(hub);
                         try { call.Invoke(target, null); }
                         catch (Exception ex) { MapPerfLog.Error("[slice] behavior.DailyTick failed", ex); }
                         finally { PeriodicSlicer.ExitBypass(hub); }
+                        if (hub != null && isIG)
+                            _slaStart.TryRemove(hub, out _);
                     });
                     any |= enq;
                     if (!enq)
                     {
+                        if (hub != null)
+                            _slaStart.TryRemove(hub, out _);
                         BoostDrain(0.25);
                         break;
                     }
@@ -1537,6 +1567,18 @@ namespace MapPerfProbe
         {
             if (__originalMethod == null) return true;
             if (!MapPerfConfig.Enabled) return true;
+
+            long dayNow;
+            try { dayNow = (long)Math.Floor(CampaignTime.Now.ToDays); }
+            catch { dayNow = long.MinValue; }
+
+            if (dayNow != long.MinValue)
+            {
+                var prev = Interlocked.Read(ref _lastDailyGlobalIdx);
+                if (prev == dayNow) return false;
+                Interlocked.Exchange(ref _lastDailyGlobalIdx, dayNow);
+            }
+
             if (!ShouldDeferPeriodic(__originalMethod)) return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
             var name = __originalMethod?.Name ?? string.Empty;
@@ -4047,7 +4089,10 @@ namespace MapPerfProbe
         private static long _nextQueuePressureLogTs;
         private static long _nextQueueDropLogTs;
         private static long _pumpCooldownUntil;
-        internal static void BreakCooldown() => Volatile.Write(ref _pumpCooldownUntil, 0);
+        internal static void BreakCooldown()
+        {
+            Volatile.Write(ref _pumpCooldownUntil, 0);
+        }
         private static long _exitHeadroom;
         private static long _exitEmpty;
         private static long _exitBudget;
@@ -5034,9 +5079,7 @@ namespace MapPerfProbe
             var overrunLimit = SubModule.PausedSnapshot ? 32.0
                 : (SubModule.FastSnapshot ? 6.0 : 3.5);
             var pumpedCap = SubModule.PausedSnapshot ? 0
-                : (SubModule.FastSnapshot ? Math.Min(6, 2 + Math.Max(1, QueueLength) / 400) : 3);
-            if (SubModule.FastSnapshot && QueueLength >= 2000)
-                pumpedCap = Math.Min(pumpedCap, 2);
+                : (SubModule.FastSnapshot ? 1 : 3);
             if (inCooldownTrickle)
                 pumpedCap = 1;
             long overshoot = 0;
