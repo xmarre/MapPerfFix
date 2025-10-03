@@ -1424,78 +1424,60 @@ namespace MapPerfProbe
             if (!ShouldDeferPeriodic(__originalMethod)) return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
 
+            var name = __originalMethod?.Name ?? string.Empty;
+            if (name == "DailyTick" || name == "OnDailyTick")
+            {
+                if (ForceSplitDispatcherDaily(__instance, __originalMethod)) return false;
+                BoostDrain(0.5);
+                PeriodicSlicer.BreakCooldown();
+                return false;
+            }
+
             var methodInfo = __originalMethod as MethodInfo;
             var args = (__args != null && __args.Length > 0) ? __args : null;
             var now = NowSec();
-            // SLA breach ⇒ DO NOT run inline; instead, force drain so the slicer catches up
             if (__originalMethod != null && _slaStart.TryGetValue(__originalMethod, out var t0) && now - t0 > 5.0)
             {
                 PeriodicSlicer.BreakCooldown();
                 BoostDrain(0.25);
             }
 
-            // if gate is closed, free a bit then retry; if still closed → DO NOT RUN INLINE
             if (!MayEnqueueNow())
             {
                 PeriodicSlicer.Pump(SubModule.FastSnapshot ? 3.0 : 2.0);
                 if (!MayEnqueueNow())
                 {
-                    // try to hard-split into per-behavior jobs; if that works we’re done
-                    if (ForceSplitDispatcherDaily(__instance, __originalMethod)) return false;
-                    // otherwise, nudge the pump and skip the monolith this frame
                     BoostDrain(0.5);
                     PeriodicSlicer.BreakCooldown();
                     return false;
                 }
             }
 
-            var added = __originalMethod != null && _slaStart.TryAdd(__originalMethod, now);
+            if (__originalMethod != null)
+                _slaStart.TryAdd(__originalMethod, now);
 
-            var enqueued = PeriodicSlicer.EnqueueSlowAction(
-                () =>
-                {
-                    RunInline();
-                });
-            if (!enqueued)
+            if (!PeriodicSlicer.EnqueueSlowAction(() =>
             {
-                if (added && __originalMethod != null)
+                PeriodicSlicer.EnterBypass(__originalMethod);
+                try
+                {
+                    methodInfo?.Invoke(__instance, args);
+                }
+                finally
+                {
+                    PeriodicSlicer.ExitBypass(__originalMethod);
+                    if (__originalMethod != null)
+                        _slaStart.TryRemove(__originalMethod, out _);
+                }
+            }))
+            {
+                if (__originalMethod != null)
                     _slaStart.TryRemove(__originalMethod, out _);
-                // last resort: try split; else skip this frame (no inline)
-                if (ForceSplitDispatcherDaily(__instance, __originalMethod)) return false;
                 BoostDrain(0.5);
                 PeriodicSlicer.BreakCooldown();
                 return false;
             }
             return false;
-
-            void RunInline()
-            {
-                PeriodicSlicer.EnterBypass(__originalMethod);
-                var sw = Stopwatch.StartNew();
-                try
-                {
-                    try
-                    {
-                        methodInfo?.Invoke(__instance, args);
-                    }
-                    catch (Exception ex)
-                    {
-                        const string excKey = "exc:Campaign.DailyTick";
-                        if (ShouldLogSlow(excKey, 30.0))
-                            MapPerfLog.Warn($"Deferred Campaign.DailyTick failed: {ex}");
-                    }
-                }
-                finally
-                {
-                    sw.Stop();
-                    PeriodicSlicer.ExitBypass(__originalMethod);
-                    if (__originalMethod != null)
-                        _slaStart.TryRemove(__originalMethod, out _);
-                    if (sw.Elapsed.TotalMilliseconds > 12.0 &&
-                        ShouldLogSlow("Campaign.DailyTick"))
-                        MapPerfLog.Warn($"[slow-job] Campaign.DailyTick took {sw.Elapsed.TotalMilliseconds:F1} ms");
-                }
-            }
         }
 
         // Hard split the dispatcher into per-behavior jobs (generic, no mod special-cases)
