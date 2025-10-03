@@ -37,6 +37,7 @@ namespace MapPerfProbe
         internal static bool EnableMapThrottle => Get(s => s.EnableMapThrottle, true);
         internal static bool ThrottleOnlyInFastTime => Get(s => s.ThrottleOnlyInFastTime, true);
         internal static bool DesyncSimWhileThrottling => Get(s => s.DesyncSimWhileThrottling, true);
+        internal static bool DeferPeriodicOnMap => Get(s => s.DeferPeriodicOnMap, true);
         internal static int SimTickEveryNSkipped => Get(s => s.SimTickEveryNSkipped, 8);
         internal static bool SilenceRepeats => Get(s => s.SilenceRepeats, true);
         internal static int RepeatSilenceSeconds => ClampInt(Get(s => s.RepeatSilenceSeconds, 4), 0, 30);

@@ -95,6 +95,7 @@
   <ItemGroup>
     <Compile Include="MapPerfConfig.cs" />
     <Compile Include="MapPerfLog.cs" />
+    <Compile Include="PeriodicHubDeferrer.cs" />
     <Compile Include="MapPerfSettings.cs" />
     <Compile Include="MsgFilter.cs" />
     <Compile Include="SubModule.cs" />
