@@ -1052,8 +1052,17 @@ namespace MapPerfProbe
                 var noPumpUntil = Volatile.Read(ref _noPumpUntilSec);
                 if (paused || (noPumpUntil > 0.0 && NowSec() < noPumpUntil))
                 {
-                    if (!paused && ShouldLogSlow("pump-suppress", PostSpikeNoPumpSec))
+                    PeriodicSlicer.GetQueueStats(out var qlenNow, out _, out _);
+                    if (!paused && qlenNow >= PumpBacklogBoostThreshold)
+                    {
+                        var trickleMs = Math.Min(4.0, pumpMs > 0.0 ? pumpMs : (fast ? PumpTailMinFastMs : PumpTailMinRunMs));
+                        if (trickleMs > 0.0)
+                            PeriodicSlicer.Pump(trickleMs);
+                    }
+                    else if (!paused && ShouldLogSlow("pump-suppress", PostSpikeNoPumpSec))
+                    {
                         MapPerfLog.Info("[slice] pump suppressed (cooldown)");
+                    }
                 }
                 else if (pumpMs > 0.0)
                 {
@@ -4828,7 +4837,11 @@ namespace MapPerfProbe
             if (msBudget <= 0.0) return;
 
             if (Stopwatch.GetTimestamp() < Volatile.Read(ref _pumpCooldownUntil))
-                return;
+            {
+                // Allow a tiny drain when backlog is large in fast-time
+                if (!(SubModule.FastSnapshot && QueueLength >= MapPerfConfig.PumpBacklogBoostThreshold && msBudget <= 4.0))
+                    return;
+            }
 
             var budgetTicks = (long)(msBudget * SubModule.MsToTicks);
             var globalStart = Stopwatch.GetTimestamp();
@@ -4842,7 +4855,7 @@ namespace MapPerfProbe
             var overrunLimit = SubModule.PausedSnapshot ? 32.0
                 : (SubModule.FastSnapshot ? 8.0 : 3.5);
             var pumpedCap = SubModule.PausedSnapshot ? 0
-                : (SubModule.FastSnapshot ? Math.Min(3, 1 + QueueLength / 6000) : 2);
+                : (SubModule.FastSnapshot ? Math.Min(6, 2 + Math.Max(1, QueueLength) / 400) : 3);
             long overshoot = 0;
             var pumpHeadroomTicks = (long)(2.0 * SubModule.MsToTicks);
             string exitReason = string.Empty;

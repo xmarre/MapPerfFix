@@ -178,11 +178,18 @@ namespace MapPerfProbe
             }
             if (!ShouldDefer())
                 return true;
-            if (!SubModule.MayEnqueueNow())
+            var canEnq = SubModule.MayEnqueueNow();
+            if (!canEnq && SubModule.FastSnapshot)
+            {
+                // free a bit, then re-check the gate
+                PeriodicSlicer.Pump(2.0);
+                canEnq = SubModule.MayEnqueueNow();
+            }
+            if (!canEnq)
                 return true;
 
             // Use bool-returning enqueue to safely fall back inline if the queue refuses us.
-            bool enq = PeriodicSlicer.EnqueueAction(() =>
+            Action action = () =>
             {
                 _reentry = true;
                 try
@@ -208,13 +215,22 @@ namespace MapPerfProbe
                 {
                     _reentry = false;
                 }
-            });
+            };
+
+            bool enq = PeriodicSlicer.EnqueueAction(action);
+            if (!enq)
+            {
+                PeriodicSlicer.Pump(SubModule.FastSnapshot ? 3.0 : 2.0);
+                if (SubModule.MayEnqueueNow())
+                    enq = PeriodicSlicer.EnqueueAction(action);
+            }
 
             if (!enq)
             {
                 if (MapPerfConfig.DebugLogging && SubModule.ShouldLogSlow("hub-deferrer-fallback", 5.0))
                 {
-                    MapPerfLog.Info($"[hub-deferrer] queue closed; running inline {__originalMethod.DeclaringType?.Name}.{__originalMethod.Name}");
+                    PeriodicSlicer.GetQueueStats(out var qlen, out var head, out var tail);
+                    MapPerfLog.Info($"[hub-deferrer] inline: {__originalMethod.DeclaringType?.Name}.{__originalMethod.Name} qlen={qlen} head={head} tail={tail}");
                 }
                 return true; // queue full or gated; run original now
             }
