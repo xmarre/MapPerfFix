@@ -31,7 +31,7 @@ namespace MapPerfProbe
             public string Mode;
         }
 
-        private static volatile Snapshot _lastSnap;
+        private static Snapshot _lastSnap;
         private static int _snapValid;
         private const double ReportIntervalSeconds = 3.0;
         private static readonly double TicksToMs = 1000.0 / Stopwatch.Frequency;
@@ -229,9 +229,9 @@ namespace MapPerfProbe
 
                 _samples++;
 
-                _sumParties += SafeCount(campaign.MobileParties);
-                _sumArmies += SafeCount(campaign.Armies);
-                _sumSettlements += SafeCount(campaign.Settlements);
+                _sumParties += SafeCount(TaleWorlds.CampaignSystem.Party.MobileParty.All);
+                _sumArmies += SafeCount(TaleWorlds.CampaignSystem.Army.Armies);
+                _sumSettlements += SafeCount(TaleWorlds.CampaignSystem.Settlement.All);
 
                 var tracks = EstimateTrackCount(campaign);
                 if (tracks > 0)
