@@ -51,8 +51,8 @@ namespace MapPerfProbe
         public bool ThrottleOnlyInFastTime { get; set; } = true;
 
         [SettingPropertyGroup("Map Throttle", GroupOrder = 1)]
-        [SettingPropertyInteger("Periodic queue hard cap", 50, 500, RequireRestart = false, Order = 7)]
-        public int PeriodicQueueHardCap { get; set; } = 150;
+        [SettingPropertyInteger("Periodic queue hard cap", 50, 2000, RequireRestart = false, Order = 7)]
+        public int PeriodicQueueHardCap { get; set; } = 300;
 
         // NOTE: To stay compatible with all MCM v5 variants (no Dropdown<T> / no SettingPropertyEnum),
         // expose an integer and map it to the enum.
