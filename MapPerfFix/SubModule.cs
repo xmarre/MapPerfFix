@@ -117,6 +117,8 @@ namespace MapPerfProbe
             new ConcurrentDictionary<MethodInfo, long>();
         private static readonly ConcurrentDictionary<string, double> _slowLogNext =
             new ConcurrentDictionary<string, double>();
+        private static readonly ConcurrentDictionary<MethodBase, double> _slaStart =
+            new ConcurrentDictionary<MethodBase, double>();
         private static double _slowLogPruneNext;
         private const int SlowLogPruneLimit = 2_048;
         private const double SlowLogPruneIntervalSeconds = 30.0;
@@ -1420,24 +1422,52 @@ namespace MapPerfProbe
             if (!ShouldDeferPeriodic(__originalMethod)) return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
 
-            // if gate is closed, free a bit then retry
+            var methodInfo = __originalMethod as MethodInfo;
+            var args = (__args != null && __args.Length > 0) ? __args : null;
+            var now = NowSec();
+            if (__originalMethod != null &&
+                _slaStart.TryGetValue(__originalMethod, out var t0) &&
+                now - t0 > 5.0)
+            {
+                RunInline();
+                return false;
+            }
+
+            // if gate is closed, free a bit then retry; if still closed → RUN NOW
             if (!MayEnqueueNow())
             {
                 PeriodicSlicer.Pump(SubModule.FastSnapshot ? 3.0 : 2.0);
-                if (!MayEnqueueNow()) return true; // still closed → run inline (last resort)
+                if (!MayEnqueueNow())
+                {
+                    RunInline();        // <— do it now (bounded by our bypass guard)
+                    return false;       // we handled it
+                }
             }
 
-            var target = __instance;
-            var mi = __originalMethod as MethodInfo;
-            if (!PeriodicSlicer.EnqueueSlowAction( // heavy → slow lane
+            var added = __originalMethod != null && _slaStart.TryAdd(__originalMethod, now);
+
+            var enqueued = PeriodicSlicer.EnqueueSlowAction(
                 () =>
                 {
-                    PeriodicSlicer.EnterBypass(__originalMethod);
-                    var sw = Stopwatch.StartNew();
+                    RunInline();
+                });
+            if (!enqueued)
+            {
+                if (added && __originalMethod != null)
+                    _slaStart.TryRemove(__originalMethod, out _);
+                return true;
+            }
+            return false;
+
+            void RunInline()
+            {
+                PeriodicSlicer.EnterBypass(__originalMethod);
+                var sw = Stopwatch.StartNew();
+                try
+                {
                     try
                     {
-                        var args = (__args != null && __args.Length > 0) ? __args : null;
-                        mi?.Invoke(target, args);
+                        methodInfo?.Invoke(__instance, args);
                     }
                     catch (Exception ex)
                     {
@@ -1445,17 +1475,18 @@ namespace MapPerfProbe
                         if (ShouldLogSlow(excKey, 30.0))
                             MapPerfLog.Warn($"Deferred Campaign.DailyTick failed: {ex}");
                     }
-                    finally
-                    {
-                        sw.Stop();
-                        PeriodicSlicer.ExitBypass(__originalMethod);
-                        if (sw.Elapsed.TotalMilliseconds > 12.0 &&
-                            ShouldLogSlow("Campaign.DailyTick"))
-                            MapPerfLog.Warn($"[slow-job] Campaign.DailyTick took {sw.Elapsed.TotalMilliseconds:F1} ms");
-                    }
-                }))
-                return true;
-            return false;
+                }
+                finally
+                {
+                    sw.Stop();
+                    PeriodicSlicer.ExitBypass(__originalMethod);
+                    if (__originalMethod != null)
+                        _slaStart.TryRemove(__originalMethod, out _);
+                    if (sw.Elapsed.TotalMilliseconds > 12.0 &&
+                        ShouldLogSlow("Campaign.DailyTick"))
+                        MapPerfLog.Warn($"[slow-job] Campaign.DailyTick took {sw.Elapsed.TotalMilliseconds:F1} ms");
+                }
+            }
         }
 
         // Handle both instance hubs (dispatcher) and static hubs (CampaignEvents) with reentry guard
@@ -4937,12 +4968,9 @@ namespace MapPerfProbe
             var inCooldownTrickle = false;
             if (Stopwatch.GetTimestamp() < Volatile.Read(ref _pumpCooldownUntil))
             {
-                // allow a tiny trickle during cooldown if backlog is large in fast-time
-                if (!(SubModule.FastSnapshot && QueueLength >= MapPerfConfig.PumpBacklogBoostThreshold))
-                    return;
-
-                // clamp to a safe trickle budget
-                msBudget = Math.Min(msBudget, 3.0);
+                // allow a tiny trickle even during cooldown in RUN and FAST
+                if (QueueLength == 0) return;
+                msBudget = Math.Min(msBudget, SubModule.FastSnapshot ? 3.0 : 2.0);
                 inCooldownTrickle = true;
             }
 
@@ -4962,7 +4990,7 @@ namespace MapPerfProbe
             if (SubModule.FastSnapshot && QueueLength >= 2000)
                 pumpedCap = Math.Min(pumpedCap, 2);
             if (inCooldownTrickle)
-                pumpedCap = Math.Min(pumpedCap, 2);
+                pumpedCap = 1;
             long overshoot = 0;
             var pumpHeadroomTicks = (long)(2.0 * SubModule.MsToTicks);
             string exitReason = string.Empty;
@@ -4984,16 +5012,20 @@ namespace MapPerfProbe
                         }
                         lock (_lock)
                         {
-                            // pick lane: in fast-time never start slow-lane items
+                            // pick lane: in fast-time give slow lane a trickle if fast lane is empty
                             if (SubModule.FastSnapshot)
                             {
                                 if (_qHandlers.Count > 0)
                                 {
                                     action = _qHandlers.Dequeue();
                                 }
+                                else if (_qHandlersSlow.Count > 0)
+                                {
+                                    action = _qHandlersSlow.Dequeue();
+                                }
                                 else
                                 {
-                                    exitReason = "slow-defer-fast";
+                                    exitReason = "empty";
                                     break;
                                 }
                             }
