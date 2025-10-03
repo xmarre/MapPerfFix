@@ -83,6 +83,7 @@ namespace MapPerfProbe
         private static int HotEnableStreak => MapPerfConfig.HotEnableStreak;
         private static double SpikeRunMs => MapPerfConfig.SpikeRunMs;
         private static double SpikePausedMs => MapPerfConfig.SpikePausedMs;
+        private static double PostSpikeNoPumpSec => MapPerfConfig.PostSpikeNoPumpSec;
         private static double FlushOnHugeFrameMs => MapPerfConfig.FlushOnHugeFrameMs;
         private static long AllocSpikeBytes => MapPerfConfig.AllocSpikeBytes;
         private static long WsSpikeBytes => MapPerfConfig.WsSpikeBytes;
@@ -121,6 +122,7 @@ namespace MapPerfProbe
         private static double _recentOverBudgetUntilSec;
         private static int HardNoEnqueueQLen => MapPerfConfig.PeriodicQueueHardCap;
         private static double _drainBoostUntilSec;
+        private static double _noPumpUntilSec;
         private static Type _campaignBehaviorManagerType;
         private static PropertyInfo _campaignBehaviorManagerProp;
         private static PropertyInfo _campaignBehaviorsProp;
@@ -858,9 +860,12 @@ namespace MapPerfProbe
                         _mapScreenSkipFrames = 0;
                         _mapScreenThrottleActive = false;
                         Interlocked.Exchange(ref _simSkipToken, 0);
-                        _forcedCatchupCooldown = Math.Max(_forcedCatchupCooldown, 0.50);
+                        _forcedCatchupCooldown = Math.Max(_forcedCatchupCooldown, 2.00);
                         _desyncDebtMs = Math.Min(_desyncDebtMs, MapPerfConfig.DesyncLowWatermarkMs * 0.5);
                         BoostDrain(0.75);
+                        var cooldownUntil = NowSec() + PostSpikeNoPumpSec;
+                        if (cooldownUntil > _noPumpUntilSec)
+                            _noPumpUntilSec = cooldownUntil;
                     }
                 }
                 var frameTag = paused ? "[PAUSED]" : (fast ? "[RUN-FAST]" : "[RUN]");
@@ -879,6 +884,8 @@ namespace MapPerfProbe
                 WriteLastFrameMsSnap(frameMs);
 
                 var overBudget = false;
+                // Treat recent big frames as over-budget to clamp pump
+                if (ReadLastFrameMsSnap() >= 45.0) overBudget = true;
                 if (onMap && !paused)
                 {
                     if (_frameBudgetEmaMs <= 0.0)
@@ -1036,8 +1043,16 @@ namespace MapPerfProbe
 
                 pumpMs = Math.Min(pumpMs, fast ? PumpBudgetFastCapMs : PumpBudgetRunCapMs);
 
-                if (pumpMs > 0.0)
+                var noPumpUntil = Volatile.Read(ref _noPumpUntilSec);
+                if (paused || (noPumpUntil > 0.0 && NowSec() < noPumpUntil))
+                {
+                    if (!paused && ShouldLogSlow("pump-suppress", PostSpikeNoPumpSec))
+                        MapPerfLog.Info("[slice] pump suppressed (cooldown)");
+                }
+                else if (pumpMs > 0.0)
+                {
                     PeriodicSlicer.Pump(pumpMs);
+                }
             }
             finally
             {
