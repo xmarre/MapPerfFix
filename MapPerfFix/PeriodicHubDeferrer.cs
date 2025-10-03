@@ -14,6 +14,10 @@ namespace MapPerfProbe
     internal static class PeriodicHubDeferrer
     {
         [ThreadStatic] private static bool _reentry;
+        private static readonly ConcurrentDictionary<MethodBase, bool> _foreignCache =
+            new ConcurrentDictionary<MethodBase, bool>();
+        private static readonly ConcurrentDictionary<MethodBase, bool> _disabledByError =
+            new ConcurrentDictionary<MethodBase, bool>();
 
         private static bool HotNow()
         {
@@ -29,9 +33,6 @@ namespace MapPerfProbe
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool ShouldDefer()
             => MapPerfConfig.Enabled && !_reentry && HotNow();
-
-        private static readonly ConcurrentDictionary<MethodBase, bool> _foreignCache =
-            new ConcurrentDictionary<MethodBase, bool>();
 
         private static bool HasForeignPatches(MethodBase method)
         {
@@ -85,7 +86,7 @@ namespace MapPerfProbe
             {
                 return false;
             }
-            return name.IndexOf("Tick", StringComparison.OrdinalIgnoreCase) >= 0
+            return name.IndexOf("Periodic", StringComparison.OrdinalIgnoreCase) >= 0
                    || name.IndexOf("Hourly", StringComparison.OrdinalIgnoreCase) >= 0
                    || name.IndexOf("Daily", StringComparison.OrdinalIgnoreCase) >= 0
                    || name.IndexOf("Weekly", StringComparison.OrdinalIgnoreCase) >= 0
@@ -155,6 +156,8 @@ namespace MapPerfProbe
         {
             if (__originalMethod == null)
                 return true;
+            if (_disabledByError.ContainsKey(__originalMethod))
+                return true;
             // Safety: don’t defer non-void (should be filtered already).
             if ((__originalMethod as MethodInfo)?.ReturnType != typeof(void))
                 return true;
@@ -184,16 +187,22 @@ namespace MapPerfProbe
                 _reentry = true;
                 try
                 {
+                    if (!SubModule.IsOnMapRunning())
+                        return;
+                    if (!__originalMethod.IsStatic && ReferenceEquals(__instance, null))
+                        return;
                     __originalMethod.Invoke(__instance, __args);
                 }
                 catch (TargetInvocationException tie)
                 {
                     var inner = tie.InnerException?.Message ?? tie.Message;
                     MapPerfLog.Warn($"[hub-deferrer] {__originalMethod.DeclaringType?.Name}.{__originalMethod.Name} threw: {inner}");
+                    _disabledByError.TryAdd(__originalMethod, true);
                 }
                 catch (Exception ex)
                 {
                     MapPerfLog.Warn($"[hub-deferrer] {__originalMethod.DeclaringType?.Name}.{__originalMethod.Name} threw: {ex.Message}");
+                    _disabledByError.TryAdd(__originalMethod, true);
                 }
                 finally
                 {
