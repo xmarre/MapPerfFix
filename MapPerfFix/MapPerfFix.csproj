@@ -94,6 +94,8 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="MapPerfConfig.cs" />
+    <Compile Include="MapIdleDrainProbe.cs" />
+    <Compile Include="MapIdleDrainMitigator.cs" />
     <Compile Include="MapPerfLog.cs" />
     <Compile Include="PeriodicHubDeferrer.cs" />
     <Compile Include="MapPerfSettings.cs" />

@@ -545,6 +545,8 @@ namespace MapPerfProbe
                 SafePatch("TryPatchType(UI)", () => TryPatchType(harmony, "TaleWorlds.GauntletUI.UIContext", new[] { "Update", "Tick" }));
                 SafePatch("TryPatchType(Layer)", () => TryPatchType(harmony, "TaleWorlds.GauntletUI.GauntletLayer", new[] { "OnLateUpdate", "Tick" }));
                 SafePatch("PatchMapScreenHotspots", () => PatchMapScreenHotspots(harmony));
+                SafePatch("Install idle-drain probe", () => MapIdleDrainProbe.Install(harmony));
+                SafePatch("Install idle-drain mitigator", () => MapIdleDrainMitigator.Install(harmony));
 
                 // 🔎 NEW: instrument the actual campaign behaviors that daily/hourly logic calls into
                 SafePatch("PatchBehaviorTicks", () => PatchBehaviorTicks(harmony));
