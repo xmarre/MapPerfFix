@@ -77,7 +77,7 @@ namespace MapPerfProbe
         internal static double PumpPauseTrickleMapMs => 0.0;
         internal static double PumpPauseTrickleMenuMs => 2.0;
         // How long to suppress pumping after a >= SpikeRunMs frame
-        internal static double PostSpikeNoPumpSec => 0.30;
+        internal static double PostSpikeNoPumpSec => 0.10;
         internal static double MapScreenProbeDtThresholdMs => 12.0;
         internal static double MapHotDurationMsThreshold => 1.0;
         internal static long MapHotAllocThresholdBytes => 128 * 1024;
