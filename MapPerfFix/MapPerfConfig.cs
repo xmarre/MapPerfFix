@@ -73,11 +73,11 @@ namespace MapPerfProbe
         internal static double PumpBudgetFastCapMs => 18.0;
         internal static double PumpTailMinRunMs => 4.0;
         internal static double PumpTailMinFastMs => 6.0;
-        // Do not pump while paused; stutters came from paused pumping + GC
-        internal static double PumpPauseTrickleMapMs => 0.0;
+        // always progress, even when paused
+        internal static double PumpPauseTrickleMapMs => 2.0;
         internal static double PumpPauseTrickleMenuMs => 2.0;
-        // How long to suppress pumping after a >= SpikeRunMs frame
-        internal static double PostSpikeNoPumpSec => 0.10;
+        // never suppress the pump; spikes should not stall backlog
+        internal static double PostSpikeNoPumpSec => 0.00;
         internal static double MapScreenProbeDtThresholdMs => 12.0;
         internal static double MapHotDurationMsThreshold => 1.0;
         internal static long MapHotAllocThresholdBytes => 128 * 1024;

@@ -5034,7 +5034,7 @@ namespace MapPerfProbe
             var inCooldownTrickle = false;
             if (Stopwatch.GetTimestamp() < Volatile.Read(ref _pumpCooldownUntil))
             {
-                // allow a tiny trickle even during cooldown in RUN and FAST
+                // always drain a bit if there's backlog (RUN or FAST)
                 if (QueueLength == 0) return;
                 msBudget = Math.Min(msBudget, SubModule.FastSnapshot ? 3.0 : 2.0);
                 inCooldownTrickle = true;
