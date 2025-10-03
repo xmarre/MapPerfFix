@@ -443,9 +443,21 @@ namespace MapPerfProbe
                         const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
                         var mi = GetZeroParamMethod(t, "DailyTick", F);
                         if (mi == null) return;
+
                         var pre = typeof(SubModule).GetMethod(nameof(DeferCampaignDailyTick_Prefix), HookBindingFlags);
-                        var hm = new HarmonyMethod(pre);
-                        harmony.Patch(mi, hm);
+                        if (pre == null) return;
+
+                        var harmonyType = harmony.GetType();
+                        var harmonyAsm = harmonyType.Assembly;
+                        var harmonyMethodType = harmonyAsm.GetType("HarmonyLib.HarmonyMethod")
+                                               ?? Type.GetType($"HarmonyLib.HarmonyMethod, {harmonyAsm.FullName}", throwOnError: false);
+                        if (harmonyMethodType == null) return;
+
+                        var harmonyMethodCtor = harmonyMethodType.GetConstructor(new[] { typeof(MethodInfo) });
+                        var preHarmonyMethod = harmonyMethodCtor?.Invoke(new object[] { pre });
+
+                        var patchMi = harmonyType.GetMethod("Patch", BindingFlags.Instance | BindingFlags.Public);
+                        patchMi?.Invoke(harmony, new[] { mi, preHarmonyMethod, null, null, null });
                     });
                 SafePatch("Slice CampaignEvents Daily/Hourly",
                     () =>
