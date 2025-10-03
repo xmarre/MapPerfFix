@@ -5059,6 +5059,7 @@ namespace MapPerfProbe
 
             int remaining;
             lock (_lock) remaining = _qHandlers.Count + _qHandlersSlow.Count;
+            var now = Stopwatch.GetTimestamp();
             var overshootMs = overshoot * SubModule.TicksToMs;
 
             if (overshoot > 0)
