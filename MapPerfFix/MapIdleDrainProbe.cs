@@ -73,6 +73,8 @@ namespace MapPerfProbe
             try
             {
                 var mapType = ResolveMapScreenType();
+                var mapStateType = Type.GetType("TaleWorlds.CampaignSystem.GameState.MapState, TaleWorlds.CampaignSystem", false)
+                                   ?? Type.GetType("TaleWorlds.CampaignSystem.MapState, TaleWorlds.CampaignSystem", false);
                 var uiType = ResolveUiContextType();
                 var prefix = AccessTools.Method(typeof(MapIdleDrainProbe), nameof(MapFramePrefix));
                 var postfix = AccessTools.Method(typeof(MapIdleDrainProbe), nameof(MapFramePostfix));
@@ -103,6 +105,20 @@ namespace MapPerfProbe
                     else
                     {
                         MapPerfLog.Warn("[idle-probe] MapScreen.OnFrameTick not found; idle drain probe inactive.");
+                    }
+                }
+
+                if (mapStateType != null && prefix != null && postfix != null)
+                {
+                    var msOnMapMode = mapStateType.GetMethod("OnMapModeTick", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    var msOnTick = mapStateType.GetMethod("OnTick", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    var target = msOnMapMode ?? msOnTick;
+                    if (target != null)
+                    {
+                        var preHm = hmCtor.Invoke(new object[] { prefix });
+                        var postHm = hmCtor.Invoke(new object[] { postfix });
+                        try { patchMi.Invoke(harmony, new object[] { target, preHm, postHm, null, null }); }
+                        catch (Exception ex) { MapPerfLog.Error("[idle-probe] patch MapState.* failed", ex); }
                     }
                 }
 
@@ -220,6 +236,7 @@ namespace MapPerfProbe
             var dtMs = (Stopwatch.GetTimestamp() - start) * TicksToMs;
             _accUiMs += dtMs;
             if (dtMs > _maxUiMs) _maxUiMs = dtMs;
+            MaybeReport();
         }
 
         private static void SampleWorldState(object mapScreen)
@@ -269,7 +286,6 @@ namespace MapPerfProbe
 
         private static void MaybeReport()
         {
-            if (_frames == 0) return;
             var nowSec = Stopwatch.GetTimestamp() * TicksToSeconds;
             if (_nextReportSec == 0.0) _nextReportSec = nowSec + ReportIntervalSeconds;
             if (nowSec < _nextReportSec) return;
