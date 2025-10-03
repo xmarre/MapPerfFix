@@ -38,11 +38,11 @@ namespace MapPerfProbe
         internal static bool ThrottleOnlyInFastTime => Get(s => s.ThrottleOnlyInFastTime, true);
         internal static bool DesyncSimWhileThrottling => Get(s => s.DesyncSimWhileThrottling, true);
         internal static bool DeferPeriodicOnMap => Get(s => s.DeferPeriodicOnMap, true);
-        internal static int SimTickEveryNSkipped => Get(s => s.SimTickEveryNSkipped, 8);
+        internal static int SimTickEveryNSkipped => Get(s => s.SimTickEveryNSkipped, 3);
         internal static bool SilenceRepeats => Get(s => s.SilenceRepeats, true);
         internal static int RepeatSilenceSeconds => ClampInt(Get(s => s.RepeatSilenceSeconds, 4), 0, 30);
-        internal static int MaxDesyncMs => Get(s => s.MaxDesyncMs, 1000);
-        internal static int DesyncLowWatermarkMs => Get(s => s.DesyncLowWatermarkMs, 400);
+        internal static int MaxDesyncMs => Get(s => s.MaxDesyncMs, 600);
+        internal static int DesyncLowWatermarkMs => Get(s => s.DesyncLowWatermarkMs, 250);
         internal static ThrottlePreset Preset => Get(s => s.Preset, ThrottlePreset.Balanced);
         internal static int PeriodicQueueHardCap => Get(s => s.PeriodicQueueHardCap, 4000);
 
@@ -65,7 +65,7 @@ namespace MapPerfProbe
         internal static long ForceFlushAllocBytes => 300_000_000;
         internal static long ForceFlushWsBytes => 500_000_000;
         internal static double PumpBudgetRunMs => 3.0;
-        internal static double PumpBudgetFastMs => 8.0;
+        internal static double PumpBudgetFastMs => 6.0;
         internal static double PumpBudgetRunBoostMs => 4.0;
         internal static double PumpBudgetFastBoostMs => 24.0; // keep
         internal static int PumpBacklogBoostThreshold => 400;
@@ -77,7 +77,7 @@ namespace MapPerfProbe
         internal static double PumpPauseTrickleMapMs => 0.0;
         internal static double PumpPauseTrickleMenuMs => 2.0;
         // How long to suppress pumping after a >= SpikeRunMs frame
-        internal static double PostSpikeNoPumpSec => 0.60;
+        internal static double PostSpikeNoPumpSec => 0.30;
         internal static double MapScreenProbeDtThresholdMs => 12.0;
         internal static double MapHotDurationMsThreshold => 1.0;
         internal static long MapHotAllocThresholdBytes => 128 * 1024;

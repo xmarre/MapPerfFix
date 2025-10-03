@@ -9,6 +9,7 @@ using System.Reflection;
 using System.Runtime;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Runtime.CompilerServices;
 using System.Text;
 using HarmonyLib;
@@ -120,6 +121,7 @@ namespace MapPerfProbe
         private const int SlowLogPruneLimit = 2_048;
         private const double SlowLogPruneIntervalSeconds = 30.0;
         private const double SlowLogRetainSeconds = 30.0;
+        private static long _dailyPrefixHits;
         private static double _recentOverBudgetUntilSec;
         private static int HardNoEnqueueQLen => MapPerfConfig.PeriodicQueueHardCap;
         private static double _drainBoostUntilSec;
@@ -154,14 +156,12 @@ namespace MapPerfProbe
         }
 
         // Global enqueue gate for PeriodicSlicer
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static bool MayEnqueueNow()
         {
             PeriodicSlicer.GetQueueStats(out var qlen, out _, out _);
             if (qlen >= HardNoEnqueueQLen) return false;
-            if (qlen > 0) return true;
-            if (!MapPerfConfig.EnableMapThrottle || !IsOnMap()) return false;
-
-            return HotOrRecent();
+            return qlen < MapPerfConfig.PumpBacklogBoostThreshold;
         }
 
         internal static int MaxQueueForEnqueue => HardNoEnqueueQLen;
@@ -435,29 +435,56 @@ namespace MapPerfProbe
                             prefix: typeof(SubModule).GetMethod(nameof(OnDailyTick_Prefix), HookBindingFlags),
                             prefix2: typeof(SubModule).GetMethod(nameof(OnHourlyTick_Prefix), HookBindingFlags));
                     });
-                SafePatch("Defer Campaign.DailyTick core",
+                SafePatch("patch all overloads",
                     () =>
                     {
                         var t = Type.GetType("TaleWorlds.CampaignSystem.Campaign, TaleWorlds.CampaignSystem");
                         if (t == null) return;
                         const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-                        var mi = GetZeroParamMethod(t, "DailyTick", F);
-                        if (mi == null) return;
 
                         var pre = typeof(SubModule).GetMethod(nameof(DeferCampaignDailyTick_Prefix), HookBindingFlags);
                         if (pre == null) return;
 
-                        var harmonyType = harmony.GetType();
-                        var harmonyAsm = harmonyType.Assembly;
-                        var harmonyMethodType = harmonyAsm.GetType("HarmonyLib.HarmonyMethod")
-                                               ?? Type.GetType($"HarmonyLib.HarmonyMethod, {harmonyAsm.FullName}", throwOnError: false);
-                        if (harmonyMethodType == null) return;
+                        // HarmonyMethod via Reflection
+                        var ht = harmony.GetType();
+                        var harmonyAsm = ht.Assembly;
+                        var hmType = harmonyAsm.GetType("HarmonyLib.HarmonyMethod")
+                                   ?? Type.GetType($"HarmonyLib.HarmonyMethod, {harmonyAsm.FullName}", false);
+                        if (hmType == null) return;
+                        var hmCtor = hmType.GetConstructor(new[] { typeof(MethodInfo) });
 
-                        var harmonyMethodCtor = harmonyMethodType.GetConstructor(new[] { typeof(MethodInfo) });
-                        var preHarmonyMethod = harmonyMethodCtor?.Invoke(new object[] { pre });
+                        var patchMi = ht.GetMethod("Patch", BindingFlags.Instance | BindingFlags.Public);
+                        if (patchMi == null) return;
 
-                        var patchMi = harmonyType.GetMethod("Patch", BindingFlags.Instance | BindingFlags.Public);
-                        patchMi?.Invoke(harmony, new[] { mi, preHarmonyMethod, null, null, null });
+                        foreach (var mi in t.GetMethods(F))
+                        {
+                            if (!string.Equals(mi.Name, "DailyTick", StringComparison.Ordinal)) continue;
+                            if (mi.IsAbstract) continue;
+                            var preHM = hmCtor?.Invoke(new object[] { pre });
+                            if (preHM != null)
+                            {
+                                try
+                                {
+                                    MemberInfo pr = hmType.GetProperty("priority");
+                                    if (pr == null) pr = hmType.GetField("priority");
+                                    if (preHM != null && pr != null)
+                                    {
+                                        var tProp = (pr as PropertyInfo)?.PropertyType ?? (pr as FieldInfo)?.FieldType;
+                                        object val = 400;
+                                        if (tProp != null && tProp.IsEnum)
+                                        {
+                                            var veryHigh = Enum.GetNames(tProp).FirstOrDefault(n => n.Equals("VeryHigh", StringComparison.OrdinalIgnoreCase));
+                                            val = veryHigh != null ? Enum.Parse(tProp, veryHigh) : Enum.ToObject(tProp, 400);
+                                        }
+                                        if (pr is PropertyInfo pi) pi.SetValue(preHM, val);
+                                        else ((FieldInfo)pr).SetValue(preHM, val);
+                                    }
+                                }
+                                catch { /* best effort */ }
+                            }
+                            try { patchMi.Invoke(harmony, new object[] { mi, preHM, null, null, null }); }
+                            catch { /* weiter */ }
+                        }
                     });
                 SafePatch("Slice CampaignEvents Daily/Hourly",
                     () =>
@@ -518,6 +545,19 @@ namespace MapPerfProbe
                 SafePatch("PatchBehaviorTicks", () => PatchBehaviorTicks(harmony));
                 SafePatch("PatchCampaignCoreTicks", () => PatchCampaignCoreTicks(harmony));
                 SafePatch("PatchDispatcherFallback", () => PatchDispatcherFallback(harmony));
+
+                if (MapPerfConfig.DebugLogging)
+                {
+                    MapPerfLog.Info($"[boot] DailyTick-prefix hits so far: {Interlocked.Read(ref _dailyPrefixHits)}");
+                    Task.Run(async () =>
+                    {
+                        for (int i = 0; i < 3; i++)
+                        {
+                            await Task.Delay(20000);
+                            MapPerfLog.Info($"[watch] DailyTick-prefix hits: {Interlocked.Read(ref _dailyPrefixHits)}");
+                        }
+                    });
+                }
             }
             catch (Exception ex)
             {
@@ -1375,40 +1415,45 @@ namespace MapPerfProbe
 
         private static bool DeferCampaignDailyTick_Prefix(object __instance, MethodBase __originalMethod, object[] __args)
         {
+            Interlocked.Increment(ref _dailyPrefixHits);
             if (!MapPerfConfig.Enabled) return true;
             if (!ShouldDeferPeriodic(__originalMethod)) return true;
             if (PeriodicSlicer.ShouldBypass(__originalMethod)) return true;
 
+            // if gate is closed, free a bit then retry
+            if (!MayEnqueueNow())
+            {
+                PeriodicSlicer.Pump(SubModule.FastSnapshot ? 3.0 : 2.0);
+                if (!MayEnqueueNow()) return true; // still closed → run inline (last resort)
+            }
+
             var target = __instance;
             var mi = __originalMethod as MethodInfo;
             if (!PeriodicSlicer.EnqueueSlowAction( // heavy → slow lane
-            () =>
-            {
-                PeriodicSlicer.EnterBypass(__originalMethod);
-                var sw = Stopwatch.StartNew();
-                try
+                () =>
                 {
-                    var args = (__args != null && __args.Length > 0) ? __args : null;
-                    mi?.Invoke(target, args);
-                }
-                catch (Exception ex)
-                {
-                    const string excKey = "exc:Campaign.DailyTick";
-                    if (ShouldLogSlow(excKey, 30.0))
-                        MapPerfLog.Warn($"Deferred Campaign.DailyTick failed: {ex}");
-                }
-                finally
-                {
-                    sw.Stop();
-                    if (sw.Elapsed.TotalMilliseconds > 12.0)
+                    PeriodicSlicer.EnterBypass(__originalMethod);
+                    var sw = Stopwatch.StartNew();
+                    try
                     {
-                        const string slowKey = "Campaign.DailyTick";
-                        if (ShouldLogSlow(slowKey))
+                        var args = (__args != null && __args.Length > 0) ? __args : null;
+                        mi?.Invoke(target, args);
+                    }
+                    catch (Exception ex)
+                    {
+                        const string excKey = "exc:Campaign.DailyTick";
+                        if (ShouldLogSlow(excKey, 30.0))
+                            MapPerfLog.Warn($"Deferred Campaign.DailyTick failed: {ex}");
+                    }
+                    finally
+                    {
+                        sw.Stop();
+                        PeriodicSlicer.ExitBypass(__originalMethod);
+                        if (sw.Elapsed.TotalMilliseconds > 12.0 &&
+                            ShouldLogSlow("Campaign.DailyTick"))
                             MapPerfLog.Warn($"[slow-job] Campaign.DailyTick took {sw.Elapsed.TotalMilliseconds:F1} ms");
                     }
-                    PeriodicSlicer.ExitBypass(__originalMethod);
-                }
-            }))
+                }))
                 return true;
             return false;
         }
@@ -4889,11 +4934,16 @@ namespace MapPerfProbe
 
             if (msBudget <= 0.0) return;
 
+            var inCooldownTrickle = false;
             if (Stopwatch.GetTimestamp() < Volatile.Read(ref _pumpCooldownUntil))
             {
-                // Allow a tiny drain when backlog is large in fast-time
-                if (!(SubModule.FastSnapshot && QueueLength >= MapPerfConfig.PumpBacklogBoostThreshold && msBudget <= 4.0))
+                // allow a tiny trickle during cooldown if backlog is large in fast-time
+                if (!(SubModule.FastSnapshot && QueueLength >= MapPerfConfig.PumpBacklogBoostThreshold))
                     return;
+
+                // clamp to a safe trickle budget
+                msBudget = Math.Min(msBudget, 3.0);
+                inCooldownTrickle = true;
             }
 
             var budgetTicks = (long)(msBudget * SubModule.MsToTicks);
@@ -4906,10 +4956,12 @@ namespace MapPerfProbe
             var throttle = true;
 
             var overrunLimit = SubModule.PausedSnapshot ? 32.0
-                : (SubModule.FastSnapshot ? 8.0 : 3.5);
+                : (SubModule.FastSnapshot ? 6.0 : 3.5);
             var pumpedCap = SubModule.PausedSnapshot ? 0
                 : (SubModule.FastSnapshot ? Math.Min(6, 2 + Math.Max(1, QueueLength) / 400) : 3);
             if (SubModule.FastSnapshot && QueueLength >= 2000)
+                pumpedCap = Math.Min(pumpedCap, 2);
+            if (inCooldownTrickle)
                 pumpedCap = Math.Min(pumpedCap, 2);
             long overshoot = 0;
             var pumpHeadroomTicks = (long)(2.0 * SubModule.MsToTicks);
@@ -4973,9 +5025,9 @@ namespace MapPerfProbe
                         pumped++;
                         budget -= Math.Max(0.0, tookMs);
 
-                        if (SubModule.FastSnapshot && tookMs > 40.0)
+                        if (SubModule.FastSnapshot && tookMs > 25.0)
                         {
-                            // back off further pumping this frame to avoid 50–800 ms overshoots
+                            // break earlier on long items in fast time
                             exitReason = "slow-item";
                             break;
                         }
@@ -5007,10 +5059,10 @@ namespace MapPerfProbe
 
             int remaining;
             lock (_lock) remaining = _qHandlers.Count + _qHandlersSlow.Count;
-            var now = Stopwatch.GetTimestamp();
+            var overshootMs = overshoot * SubModule.TicksToMs;
+
             if (overshoot > 0)
             {
-                var overshootMs = overshoot * SubModule.TicksToMs;
                 var edges = OvershootEdgesMs;
                 var bin = edges.Length;
                 while (bin > 0 && overshootMs <= edges[bin - 1])
@@ -5025,11 +5077,12 @@ namespace MapPerfProbe
                 else
                     MapPerfLog.Debug(msg);
 
-                if (SubModule.FastSnapshot && overshootMs > 24.0)
-                {
-                    Volatile.Write(ref _pumpCooldownUntil, Stopwatch.GetTimestamp()
-                        + (long)(Stopwatch.Frequency * 0.25));
-                }
+            }
+
+            if (SubModule.FastSnapshot && (overshootMs > 24.0 || exitReason == "slow-item"))
+            {
+                Volatile.Write(ref _pumpCooldownUntil, Stopwatch.GetTimestamp()
+                    + (long)(Stopwatch.Frequency * MapPerfConfig.PostSpikeNoPumpSec));
             }
             if (string.IsNullOrEmpty(exitReason))
                 exitReason = "done";
