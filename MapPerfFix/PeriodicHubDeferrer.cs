@@ -30,14 +30,15 @@ namespace MapPerfProbe
         private static bool ShouldDefer()
             => MapPerfConfig.Enabled && !_reentry && HotNow();
 
-        private static readonly ConcurrentDictionary<MethodBase, bool> _foreignCache = new();
+        private static readonly ConcurrentDictionary<MethodBase, bool> _foreignCache =
+            new ConcurrentDictionary<MethodBase, bool>();
 
         private static bool HasForeignPatches(MethodBase method)
         {
             if (method == null)
                 return false;
 
-            return _foreignCache.GetOrAdd(method, static key =>
+            return _foreignCache.GetOrAdd(method, key =>
             {
                 try
                 {
@@ -45,7 +46,7 @@ namespace MapPerfProbe
                     if (info == null)
                         return false;
 
-                    static bool HasNonSelf(IEnumerable<Patch> patches)
+                    bool HasNonSelf(IEnumerable<Patch> patches)
                     {
                         if (patches == null)
                             return false;
