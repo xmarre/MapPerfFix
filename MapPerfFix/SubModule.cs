@@ -120,6 +120,7 @@ namespace MapPerfProbe
         private static readonly ConcurrentDictionary<MethodBase, double> _slaStart =
             new ConcurrentDictionary<MethodBase, double>();
         private static double _slowLogPruneNext;
+        // SLA guard for long periodics
         private const int SlowLogPruneLimit = 2_048;
         private const double SlowLogPruneIntervalSeconds = 30.0;
         private const double SlowLogRetainSeconds = 30.0;
@@ -141,9 +142,12 @@ namespace MapPerfProbe
             Volatile.Write(ref _drainBoostUntilSec, until);
         }
 
+        // Defer periodics whenever we’re on the map (below hard cap) so heavy mods never run inline.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool ShouldDeferPeriodic(MethodBase hub)
         {
+            if (!MapPerfConfig.Enabled) return false;
+
             PeriodicSlicer.GetQueueStats(out var queueLength, out _, out _);
             if (queueLength >= HardNoEnqueueQLen) return false;
 
@@ -151,19 +155,17 @@ namespace MapPerfProbe
             if (hub == null)
                 return queueLength > 0;
 
-            if (!MapPerfConfig.EnableMapThrottle) return false;
             if (!IsOnMap()) return false;
 
-            return HotOrRecent();
+            return true;
         }
 
-        // Global enqueue gate for PeriodicSlicer
+        // Only block enqueues at the *hard* cap; otherwise let the slicer take it.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static bool MayEnqueueNow()
         {
-            PeriodicSlicer.GetQueueStats(out var qlen, out _, out _);
-            if (qlen >= HardNoEnqueueQLen) return false;
-            return qlen < MapPerfConfig.PumpBacklogBoostThreshold;
+            PeriodicSlicer.GetQueueStats(out var q, out _, out _);
+            return q < HardNoEnqueueQLen;
         }
 
         internal static int MaxQueueForEnqueue => HardNoEnqueueQLen;
@@ -1425,22 +1427,25 @@ namespace MapPerfProbe
             var methodInfo = __originalMethod as MethodInfo;
             var args = (__args != null && __args.Length > 0) ? __args : null;
             var now = NowSec();
-            if (__originalMethod != null &&
-                _slaStart.TryGetValue(__originalMethod, out var t0) &&
-                now - t0 > 5.0)
+            // SLA breach ⇒ DO NOT run inline; instead, force drain so the slicer catches up
+            if (__originalMethod != null && _slaStart.TryGetValue(__originalMethod, out var t0) && now - t0 > 5.0)
             {
-                RunInline();
-                return false;
+                PeriodicSlicer.BreakCooldown();
+                BoostDrain(0.25);
             }
 
-            // if gate is closed, free a bit then retry; if still closed → RUN NOW
+            // if gate is closed, free a bit then retry; if still closed → DO NOT RUN INLINE
             if (!MayEnqueueNow())
             {
                 PeriodicSlicer.Pump(SubModule.FastSnapshot ? 3.0 : 2.0);
                 if (!MayEnqueueNow())
                 {
-                    RunInline();        // <— do it now (bounded by our bypass guard)
-                    return false;       // we handled it
+                    // try to hard-split into per-behavior jobs; if that works we’re done
+                    if (ForceSplitDispatcherDaily(__instance, __originalMethod)) return false;
+                    // otherwise, nudge the pump and skip the monolith this frame
+                    BoostDrain(0.5);
+                    PeriodicSlicer.BreakCooldown();
+                    return false;
                 }
             }
 
@@ -1455,7 +1460,11 @@ namespace MapPerfProbe
             {
                 if (added && __originalMethod != null)
                     _slaStart.TryRemove(__originalMethod, out _);
-                return true;
+                // last resort: try split; else skip this frame (no inline)
+                if (ForceSplitDispatcherDaily(__instance, __originalMethod)) return false;
+                BoostDrain(0.5);
+                PeriodicSlicer.BreakCooldown();
+                return false;
             }
             return false;
 
@@ -1489,6 +1498,58 @@ namespace MapPerfProbe
             }
         }
 
+        // Hard split the dispatcher into per-behavior jobs (generic, no mod special-cases)
+        private static bool ForceSplitDispatcherDaily(object dispatcher, MethodBase hub)
+        {
+            try
+            {
+                var camp = Campaign.Current;
+                if (camp == null) return false;
+                if (_campaignBehaviorManagerType == null)
+                    _campaignBehaviorManagerType = Type.GetType("TaleWorlds.CampaignSystem.CampaignBehaviorManager, TaleWorlds.CampaignSystem");
+                if (_campaignBehaviorManagerProp == null)
+                    _campaignBehaviorManagerProp = typeof(Campaign).GetProperty("CampaignBehaviorManager",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (_campaignBehaviorsProp == null && _campaignBehaviorManagerType != null)
+                    _campaignBehaviorsProp = _campaignBehaviorManagerType.GetProperty("Behaviors",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+                var mgr = _campaignBehaviorManagerProp?.GetValue(camp);
+                var list = _campaignBehaviorsProp?.GetValue(mgr) as IEnumerable;
+                if (list == null) return false;
+
+                var any = false;
+                foreach (var beh in list)
+                {
+                    if (beh == null) continue;
+                    var mi = beh.GetType().GetMethod("DailyTick",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (mi == null) continue;
+                    var target = beh;
+                    var call = mi;
+                    var enq = PeriodicSlicer.EnqueueSlowAction(() =>
+                    {
+                        PeriodicSlicer.EnterBypass(hub);
+                        try { call.Invoke(target, null); }
+                        catch (Exception ex) { MapPerfLog.Error("[slice] behavior.DailyTick failed", ex); }
+                        finally { PeriodicSlicer.ExitBypass(hub); }
+                    });
+                    any |= enq;
+                    if (!enq)
+                    {
+                        BoostDrain(0.25);
+                        break;
+                    }
+                }
+
+                return any;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         // Handle both instance hubs (dispatcher) and static hubs (CampaignEvents) with reentry guard
         public static bool OnDailyTick_Prefix(object __instance, MethodBase __originalMethod)
         {
@@ -1500,8 +1561,10 @@ namespace MapPerfProbe
             // Split the dispatcher hub: handle exact names on .NET 4.7.2
             if (name == "DailyTick" || name == "OnDailyTick")
             {
+                // Try existing split; if it fails, fall back to hard behavior split
                 if (SplitAndEnqueueDispatcherChildren(__instance, "DailyTick", __originalMethod)) return false;
                 if (SplitAndEnqueueDispatcherChildren(__instance, "OnDailyTick", __originalMethod)) return false;
+                if (ForceSplitDispatcherDaily(__instance, __originalMethod)) return false;
             }
 
             // Fallback to generic redirect.
@@ -3964,6 +4027,8 @@ namespace MapPerfProbe
     static class PeriodicSlicer
     {
         // Sliced handlers drained under a small per-frame budget
+        // FAST-time fairness: run ~3 fast-lane items, then 1 slow-lane item.
+        private static int _fastSinceSlow = 0;
         private static readonly Queue<Action> _qHandlers = new Queue<Action>(4096);
         private static readonly object _lock = new object();
         private static readonly Queue<Action> _qHandlersSlow = new Queue<Action>(); // heavy lane
@@ -4000,6 +4065,7 @@ namespace MapPerfProbe
         private static long _nextQueuePressureLogTs;
         private static long _nextQueueDropLogTs;
         private static long _pumpCooldownUntil;
+        internal static void BreakCooldown() => Volatile.Write(ref _pumpCooldownUntil, 0);
         private static long _exitHeadroom;
         private static long _exitEmpty;
         private static long _exitBudget;
@@ -5012,21 +5078,33 @@ namespace MapPerfProbe
                         }
                         lock (_lock)
                         {
-                            // pick lane: in fast-time give slow lane a trickle if fast lane is empty
+                            // lane pick with fairness
                             if (SubModule.FastSnapshot)
                             {
-                                if (_qHandlers.Count > 0)
+                                var fastAvail = _qHandlers.Count > 0;
+                                var slowAvail = _qHandlersSlow.Count > 0;
+                                if (!fastAvail && !slowAvail)
                                 {
-                                    action = _qHandlers.Dequeue();
-                                }
-                                else if (_qHandlersSlow.Count > 0)
-                                {
-                                    action = _qHandlersSlow.Dequeue();
-                                }
-                                else
-                                {
+                                    _fastSinceSlow = 0;
                                     exitReason = "empty";
                                     break;
+                                }
+
+                                // 3 fast, then 1 slow (if present)
+                                if (slowAvail && (_fastSinceSlow >= 3 || !fastAvail))
+                                {
+                                    action = _qHandlersSlow.Dequeue();
+                                    _fastSinceSlow = 0;
+                                }
+                                else if (fastAvail)
+                                {
+                                    action = _qHandlers.Dequeue();
+                                    _fastSinceSlow++;
+                                }
+                                else // no fast, but slow present
+                                {
+                                    action = _qHandlersSlow.Dequeue();
+                                    _fastSinceSlow = 0;
                                 }
                             }
                             else
@@ -5044,6 +5122,7 @@ namespace MapPerfProbe
                                     exitReason = "empty";
                                     break;
                                 }
+                                _fastSinceSlow = 0;
                             }
                         }
 
