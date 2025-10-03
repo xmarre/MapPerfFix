@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 
 namespace MapPerfProbe
 {
@@ -37,10 +38,16 @@ namespace MapPerfProbe
         internal static bool ThrottleOnlyInFastTime => Get(s => s.ThrottleOnlyInFastTime, true);
         internal static bool DesyncSimWhileThrottling => Get(s => s.DesyncSimWhileThrottling, true);
         internal static int SimTickEveryNSkipped => Get(s => s.SimTickEveryNSkipped, 8);
+        internal static bool SilenceRepeats => Get(s => s.SilenceRepeats, true);
+        internal static int RepeatSilenceSeconds => ClampInt(Get(s => s.RepeatSilenceSeconds, 4), 0, 30);
         internal static int MaxDesyncMs => Get(s => s.MaxDesyncMs, 1000);
         internal static int DesyncLowWatermarkMs => Get(s => s.DesyncLowWatermarkMs, 400);
         internal static ThrottlePreset Preset => Get(s => s.Preset, ThrottlePreset.Balanced);
         internal static int PeriodicQueueHardCap => Get(s => s.PeriodicQueueHardCap, 150);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int ClampInt(int value, int min, int max)
+            => value < min ? min : (value > max ? max : value);
 
         // Fixed internals (kept sane; not exposed)
         internal static double BudgetAlpha => 0.05;

@@ -71,6 +71,15 @@ namespace MapPerfProbe
             }
         }
 
+        // -------- Message dedup ----------
+        [SettingPropertyGroup("Message Filters", GroupOrder = 10)]
+        [SettingPropertyBool("Silence immediate repeats", Order = -2)]
+        public bool SilenceRepeats { get; set; } = true;
+
+        [SettingPropertyGroup("Message Filters")]
+        [SettingPropertyInteger("Repeat silence window (seconds)", 0, 30, RequireRestart = false, Order = -1)]
+        public int RepeatSilenceSeconds { get; set; } = 4;
+
         // -------- Message Filters ----------
         [SettingPropertyGroup("Message Filters", GroupOrder = 10)]
         [SettingPropertyBool("Silence: Raids", Order = 0)]

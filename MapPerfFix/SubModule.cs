@@ -846,8 +846,22 @@ namespace MapPerfProbe
                 if (onMap != _wasOnMap)
                 {
                     _wasOnMap = onMap;
-                    if (onMap)
-                        Interlocked.Exchange(ref MsgFilter.FilterCount, 0);
+                    Interlocked.Exchange(ref MsgFilter.FilterCount, 0);
+                    MsgFilter.ClearDedup();
+                }
+
+                if (fast && onMap)
+                {
+                    var lastMs = ReadLastFrameMsSnap();
+                    if (lastMs >= MapPerfConfig.SpikeRunMs)
+                    {
+                        _mapScreenSkipFrames = 0;
+                        _mapScreenThrottleActive = false;
+                        Interlocked.Exchange(ref _simSkipToken, 0);
+                        _forcedCatchupCooldown = Math.Max(_forcedCatchupCooldown, 0.50);
+                        _desyncDebtMs = Math.Min(_desyncDebtMs, MapPerfConfig.DesyncLowWatermarkMs * 0.5);
+                        BoostDrain(0.75);
+                    }
                 }
                 var frameTag = paused ? "[PAUSED]" : (fast ? "[RUN-FAST]" : "[RUN]");
                 if (!onMap)
