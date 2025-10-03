@@ -10,7 +10,7 @@ namespace MapPerfProbe
 {
     internal static class MapPauseSkipper
     {
-        private const string HarmonyId = SubModule.HarmonyId + ".pause-skipper";
+        private static readonly string HarmonyId = SubModule.HarmonyId + ".pause-skipper";
         private static readonly ConcurrentDictionary<(Type Type, string Name), MemberInfo> _boolCache = new();
         private static Harmony _harmony;
 
