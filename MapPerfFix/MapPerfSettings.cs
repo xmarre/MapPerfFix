@@ -51,8 +51,8 @@ namespace MapPerfProbe
         public bool ThrottleOnlyInFastTime { get; set; } = true;
 
         [SettingPropertyGroup("Map Throttle", GroupOrder = 1)]
-        [SettingPropertyInteger("Periodic queue hard cap", 50, 2000, RequireRestart = false, Order = 7)]
-        public int PeriodicQueueHardCap { get; set; } = 300;
+        [SettingPropertyInteger("Periodic queue hard cap", 50, 5000, RequireRestart = false, Order = 7)]
+        public int PeriodicQueueHardCap { get; set; } = 4000;
 
         [SettingPropertyGroup("Map Throttle", GroupOrder = 1)]
         [SettingPropertyBool("Defer ALL periodic ticks on map (safer, no spikes)", Order = 8)]
