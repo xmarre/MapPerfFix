@@ -3,9 +3,11 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using HarmonyLib;
 
@@ -13,7 +15,19 @@ namespace MapPerfProbe
 {
     internal static class MsgFilter
     {
+        private static readonly ConcurrentDictionary<string, double> _recent =
+            new ConcurrentDictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Regex WsCollapse = new Regex("\\s+", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private static double _nextPruneSec;
         internal static int FilterCount;
+
+        internal static void ClearDedup()
+        {
+            _recent.Clear();
+            Volatile.Write(ref _nextPruneSec, 0.0);
+            // optional: zero the counter so HUD stats align after transitions
+            Interlocked.Exchange(ref FilterCount, 0);
+        }
 
         private static readonly string[] Bypass =
         {
@@ -87,6 +101,8 @@ namespace MapPerfProbe
                 return false;
 
             var s = text.Trim();
+            if (s.IndexOf(' ') >= 0)
+                s = WsCollapse.Replace(s, " ");
 
             for (int i = 0; i < Bypass.Length; i++)
             {
@@ -105,6 +121,38 @@ namespace MapPerfProbe
                         MapPerfLog.Info($"[filter/custom] {token} :: {s}");
                     Interlocked.Increment(ref FilterCount);
                     return true;
+                }
+            }
+
+            var repeatWindow = MapPerfConfig.SilenceRepeats
+                ? Math.Max(0, MapPerfConfig.RepeatSilenceSeconds)
+                : 0;
+            if (repeatWindow > 0)
+            {
+                var now = NowSec();
+                if (_recent.TryGetValue(s, out var until) && now < until)
+                {
+                    Interlocked.Increment(ref FilterCount);
+                    return true;
+                }
+
+                _recent[s] = now + repeatWindow;
+
+                var nextPrune = Volatile.Read(ref _nextPruneSec);
+                if (now >= nextPrune)
+                {
+                    var newDeadline = now + 5.0;
+                    if (Interlocked.CompareExchange(ref _nextPruneSec, newDeadline, nextPrune) == nextPrune)
+                    {
+                        foreach (var kv in _recent)
+                        {
+                            if (kv.Value < now)
+                                _recent.TryRemove(kv.Key, out _);
+                        }
+
+                        if (_recent.Count > 1024)
+                            _recent.Clear();
+                    }
                 }
             }
 
@@ -134,6 +182,9 @@ namespace MapPerfProbe
             }
             return false;
         }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static double NowSec() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool RequiresWordBoundary(string token)
