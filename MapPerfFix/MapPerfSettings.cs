@@ -75,6 +75,18 @@ namespace MapPerfProbe
             }
         }
 
+        [SettingPropertyGroup("Map Performance/Pause", GroupOrder = 2)]
+        [SettingPropertyBool("Hard-skip MapScreen while paused",
+            HintText = "Skips MapScreen.OnFrameTick when time is stopped.",
+            RequireRestart = false, Order = 0)]
+        public bool HardPauseSkip { get; set; } = true;
+
+        [SettingPropertyGroup("Map Performance/Pause", GroupOrder = 2)]
+        [SettingPropertyBool("Skip party/army visuals while paused",
+            HintText = "Stops PartyVisual/ArmyVisual Tick except hovered/selected/tracked and on-screen.",
+            RequireRestart = false, Order = 1)]
+        public bool SkipPausedVisuals { get; set; } = true;
+
         // -------- Message dedup ----------
         [SettingPropertyGroup("Message Filters", GroupOrder = 10)]
         [SettingPropertyBool("Silence immediate repeats", Order = -2)]

@@ -482,11 +482,14 @@ namespace MapPerfProbe
 
             var windowSec = Math.Max(1e-6, nowSec - _windowStartSec);
             var mapFrames = _frames;
-            var uiFrames = _uiFrames;
-            // FPS derives from map frames when present; UI-only windows fall back to UI frames.
-            var fps = mapFrames > 0 ? mapFrames / windowSec : uiFrames / windowSec;
+            var uiCalls = _uiFrames;
+            var hasMapFrames = mapFrames > 0;
+
+            // FPS derives solely from real map frames.
+            var fps = hasMapFrames ? mapFrames / windowSec : 0.0;
+            var fpsStr = hasMapFrames ? $"{fps:F1}" : "—";
             // Require enough window time and map frames before classifying low FPS to avoid UI-only false positives.
-            var canJudgeFps = windowSec >= 2.0 && mapFrames >= Math.Max(30, (int)(20 * windowSec));
+            var canJudgeFps = hasMapFrames && windowSec >= 2.0 && mapFrames >= Math.Max(30, (int)(20 * windowSec));
             var avgMapMs = _mMap.Avg;
             var avgUiMs = _mUI.Avg;
             var avgMsTick = _mMS.Avg;
@@ -521,12 +524,28 @@ namespace MapPerfProbe
             PublishSnapshot(mapFrames, avgMapMs, _maxMapFrameMs, avgUiMs, _maxUiMs,
                 avgParties, avgArmies, avgSettlements, avgTracks, d0, d1, d2, ws, deltaWs, mode);
 
-            var cpuBudgetMs = 1000.0 / Math.Max(1.0, fps);
-            var longPct = _mMap.CountAbove(1.25 * cpuBudgetMs) * 100.0 / totalMapSamples;
-            var veryLongPct = _mMap.CountAbove(2.0 * cpuBudgetMs) * 100.0 / totalMapSamples;
+            double cpuBudgetMs = 0.0;
+            double longPct = 0.0;
+            double veryLongPct = 0.0;
+            if (hasMapFrames)
+            {
+                cpuBudgetMs = 1000.0 / Math.Max(1.0, fps);
+                longPct = _mMap.CountAbove(1.25 * cpuBudgetMs) * 100.0 / totalMapSamples;
+                veryLongPct = _mMap.CountAbove(2.0 * cpuBudgetMs) * 100.0 / totalMapSamples;
+            }
+
+            var frameDist = hasMapFrames
+                ? FormattableString.Invariant($" long_frame%={longPct:F1} very_long%={veryLongPct:F1}")
+                : string.Empty;
 
             MapPerfLog.Info(FormattableString.Invariant(
-                $"[idle-probe] mode={mode} fps={fps:F1} frames={mapFrames} ui_frames={uiFrames} avg_map_ms={avgMapMs:F2} p95_map_ms={p95Map:F2} max_map_ms={_maxMapFrameMs:F2} long_frame%={longPct:F1} very_long%={veryLongPct:F1} avg_ui_ms={avgUiMs:F2} p95_ui_ms={p95Ui:F2} | p95_ms={p95Ms:F2} p95_camp={p95Camp:F2} p95_gl={p95Gl:F2} | world≈ parties={avgParties:F0} armies={avgArmies:F0} settlements={avgSettlements:F0} tracks={avgTracks:F0} | GCΔ G0={d0} G1={d1} G2={d2} | WS={ws}MB (Δ{deltaWs}MB)"));
+                $"[idle-probe] mode={mode} fps={fpsStr} frames={mapFrames} ui_calls={uiCalls} avg_map_ms={avgMapMs:F2} p95_map_ms={p95Map:F2} max_map_ms={_maxMapFrameMs:F2}{frameDist} avg_ui_ms={avgUiMs:F2} p95_ui_ms={p95Ui:F2} | p95_ms={p95Ms:F2} p95_camp={p95Camp:F2} p95_gl={p95Gl:F2} | world≈ parties={avgParties:F0} armies={avgArmies:F0} settlements={avgSettlements:F0} tracks={avgTracks:F0} | GCΔ G0={d0} G1={d1} G2={d2} | WS={ws}MB (Δ{deltaWs}MB)"));
+
+            if (!hasMapFrames)
+            {
+                ResetWindow();
+                return;
+            }
 
             var managedLoadMs = avgMapMs + avgUiMs + avgMsTick + avgCamp + p95Gl;
             string DetermineCause()
@@ -544,7 +563,7 @@ namespace MapPerfProbe
                 if (d1 > 0 || d2 > 0)
                     cause += " + GC";
                 MapPerfLog.Warn(FormattableString.Invariant(
-                    $"[idle-probe][low-fps] fps={fps:F1} frames={mapFrames} ui_frames={uiFrames} budget_ms≈{cpuBudgetMs:F1} managed_load_ms≈{managedLoadMs:F1} cause={cause} p95 map={p95Map:F1} ms={p95Ms:F1} camp={p95Camp:F1} ui={p95Ui:F1} gl={p95Gl:F1} | GCΔ G0={d0} G1={d1} G2={d2} WSΔ={deltaWs}MB"));
+                    $"[idle-probe][low-fps] fps={fps:F1} frames={mapFrames} ui_calls={uiCalls} budget_ms≈{cpuBudgetMs:F1} managed_load_ms≈{managedLoadMs:F1} cause={cause} p95 map={p95Map:F1} ms={p95Ms:F1} camp={p95Camp:F1} ui={p95Ui:F1} gl={p95Gl:F1} | GCΔ G0={d0} G1={d1} G2={d2} WSΔ={deltaWs}MB"));
             }
 
             if (mapFrames > 0 && fps >= 55.0 && (p95Map > 2.0 || _maxMapFrameMs > 3.0 * cpuBudgetMs))
@@ -553,7 +572,7 @@ namespace MapPerfProbe
                 if (d1 > 0 || d2 > 0)
                     cause += " + GC";
                 MapPerfLog.Warn(FormattableString.Invariant(
-                    $"[idle-probe][stutter] fps={fps:F1} frames={mapFrames} ui_frames={uiFrames} budget_ms≈{cpuBudgetMs:F1} max_map_ms={_maxMapFrameMs:F1} cause={cause} p95 map={p95Map:F1} ms={p95Ms:F1} camp={p95Camp:F1} ui={p95Ui:F1} gl={p95Gl:F1} | GCΔ G0={d0} G1={d1} G2={d2} WSΔ={deltaWs}MB"));
+                    $"[idle-probe][stutter] fps={fps:F1} frames={mapFrames} ui_calls={uiCalls} budget_ms≈{cpuBudgetMs:F1} max_map_ms={_maxMapFrameMs:F1} cause={cause} p95 map={p95Map:F1} ms={p95Ms:F1} camp={p95Camp:F1} ui={p95Ui:F1} gl={p95Gl:F1} | GCΔ G0={d0} G1={d1} G2={d2} WSΔ={deltaWs}MB"));
             }
 
             ResetWindow();

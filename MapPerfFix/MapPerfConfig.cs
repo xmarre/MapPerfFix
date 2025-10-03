@@ -34,6 +34,8 @@ namespace MapPerfProbe
 
         internal static bool Enabled => Get(s => s.Enabled, true);
         internal static bool DebugLogging => Get(s => s.DebugLogging, false);
+        internal static bool HardPauseSkip      => Get(s => s.HardPauseSkip, true);
+        internal static bool SkipPausedVisuals  => Get(s => s.SkipPausedVisuals, true);
         internal static bool EnableMapThrottle => Get(s => s.EnableMapThrottle, true);
         internal static bool ThrottleOnlyInFastTime => Get(s => s.ThrottleOnlyInFastTime, true);
         internal static bool DesyncSimWhileThrottling => Get(s => s.DesyncSimWhileThrottling, true);

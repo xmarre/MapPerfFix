@@ -424,6 +424,7 @@ namespace MapPerfProbe
                 // IMPORTANT: after bootstrapping the deferrer assembly, apply the throttle patch
                 // before broader instrumentation so its bool-prefix can skip the original when needed.
                 SafePatch("PatchMapScreenThrottle", () => PatchMapScreenThrottle(harmony));
+                SafePatch("Install MapPauseSkipper", MapPauseSkipper.Install);
 
                 // High-level map/UI hooks (already working)
                 SafePatch("TryPatchType(MapState)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.GameState.MapState", new[] { "OnTick", "OnMapModeTick", "OnFrameTick" }));
