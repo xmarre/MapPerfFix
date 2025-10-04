@@ -112,11 +112,12 @@ namespace MapPerfProbe
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool OnFrameTickPrefix()
-            => !(MapPerfConfig.HardPauseSkip && IsPaused());
+            => !(MapPerfConfig.HardPauseSkip && InitGate.MapReady() && IsPaused());
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool PartyVisualTickPrefix(object __instance)
         {
+            if (!InitGate.MapReady()) return true;
             if (!IsPaused()) return true;
             if (!MapPerfConfig.SkipPausedVisuals) return true; // MCM toggle
 
@@ -154,11 +155,11 @@ namespace MapPerfProbe
             var key = (Type: type, Name: name);
             var member = _boolCache.GetOrAdd(key, k =>
             {
-                var fi_l = AccessTools.Field(k.Type, k.Name);
-                if (fi_l != null && fi_l.FieldType == typeof(bool)) return (MemberInfo)fi_l;
+                var fi = AccessTools.Field(k.Type, k.Name);
+                if (fi != null && fi.FieldType == typeof(bool)) return (MemberInfo)fi;
 
-                var pi_l = AccessTools.Property(k.Type, k.Name);
-                if (pi_l != null && pi_l.PropertyType == typeof(bool)) return (MemberInfo)pi_l;
+                var pi = AccessTools.Property(k.Type, k.Name);
+                if (pi != null && pi.PropertyType == typeof(bool)) return (MemberInfo)pi;
 
                 return null;
             });
@@ -182,7 +183,7 @@ namespace MapPerfProbe
                 try
                 {
                     var getter = pi.GetMethod;
-                    return getter != null ? (bool)getter.Invoke(instance, new object[0]) : (bool?)null;
+                    return getter != null ? (bool)getter.Invoke(instance, Array.Empty<object>()) : (bool?)null;
                 }
                 catch
                 {
