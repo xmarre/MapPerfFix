@@ -26,7 +26,7 @@ namespace MapPerfProbe
             try { CampaignEvents.OnNewGameCreatedEvent.AddNonSerializedListener(NewGameOwner, _ => OnReady()); }
             catch { /* best effort */ }
 
-            try { CampaignEvents.OnSessionLaunchedEvent.AddNonSerializedListener(SessionOwner, OnReady); }
+            try { CampaignEvents.OnSessionLaunchedEvent.AddNonSerializedListener(SessionOwner, _ => OnReady()); }
             catch { /* best effort */ }
         }
 
