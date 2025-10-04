@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using HarmonyLib;
@@ -42,10 +43,11 @@ namespace MapPerfProbe
             if (_harmony == null) return;
             try
             {
-                var method = AccessTools.Method(typeof(Campaign), "RealTick", new[] { typeof(float) });
-                if (!IsPatchable(method)) return;
-
-                _harmony.Patch(method, prefix: new HarmonyMethod(typeof(PauseSimSkipper), nameof(Campaign_RealTick_Prefix)));
+                var methods = AccessTools
+                    .GetDeclaredMethods(typeof(Campaign))
+                    .Where(m => m.Name == "RealTick" && IsPatchable(m));
+                foreach (var mi in methods)
+                    _harmony.Patch(mi, prefix: new HarmonyMethod(typeof(PauseSimSkipper), nameof(Campaign_RealTick_Prefix)));
             }
             catch (Exception ex)
             {
@@ -60,11 +62,11 @@ namespace MapPerfProbe
             {
                 var cacheType = AccessTools.TypeByName("TaleWorlds.CampaignSystem.CampaignTickCacheDataStore");
                 if (cacheType == null) return;
-
-                var method = AccessTools.Method(cacheType, "RealTick", new[] { typeof(float) });
-                if (!IsPatchable(method)) return;
-
-                _harmony.Patch(method, prefix: new HarmonyMethod(typeof(PauseSimSkipper), nameof(Cache_RealTick_Prefix)));
+                foreach (var mi in AccessTools.GetDeclaredMethods(cacheType))
+                {
+                    if (mi.Name != "RealTick" || !IsPatchable(mi)) continue;
+                    _harmony.Patch(mi, prefix: new HarmonyMethod(typeof(PauseSimSkipper), nameof(Cache_RealTick_Prefix)));
+                }
             }
             catch (Exception ex)
             {
