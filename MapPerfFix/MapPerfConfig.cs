@@ -40,6 +40,8 @@ namespace MapPerfProbe
         internal static bool ThrottleCacheWhenPaused        => Get(s => s.ThrottleCacheWhenPaused, true);
         internal static bool SkipCacheRealTickWhenPaused    => Get(s => s.SkipCacheRealTickWhenPaused, false);
         internal static int  CachePauseMinIntervalMs        => ClampInt(Get(s => s.CachePauseMinIntervalMs, 500), 50, 5000);
+        internal static bool ThrottlePausedMapState         => Get(s => s.ThrottlePausedMapState, true);
+        internal static int  PausedMapStateMinIntervalMs    => ClampInt(Get(s => s.PausedMapStateMinIntervalMs, 120), 30, 5000);
         internal static bool EnableMapThrottle => Get(s => s.EnableMapThrottle, true);
         internal static bool ThrottleOnlyInFastTime => Get(s => s.ThrottleOnlyInFastTime, true);
         internal static bool DesyncSimWhileThrottling => Get(s => s.DesyncSimWhileThrottling, true);

@@ -205,6 +205,7 @@ namespace MapPerfProbe
         {
             InitGate.Reset();
             PauseSimSkipper.ResetCacheGate();
+            PausedMapStateThrottler.ResetGate();
             _lastDailyIdx.Clear();
             _lastHourlyIdx.Clear();
             _lastWeeklyIdx.Clear();
@@ -364,6 +365,7 @@ namespace MapPerfProbe
 
         // --- MapScreen throttling (real perf tweak) ---
         private static GCLatencyMode _prevGcMode = GCSettings.LatencyMode;
+        private static bool _gcLowLatencyApplied;
         private static int _mapScreenSkipFrames;
         private static double MapScreenBackoffMs1 => MapPerfConfig.MapScreenBackoffMs1;
         private static double MapScreenBackoffMs2 => MapPerfConfig.MapScreenBackoffMs2;
@@ -421,8 +423,15 @@ namespace MapPerfProbe
                 _prevGcMode = GCSettings.LatencyMode;
                 if (_lastEnabled)
                 {
-                    try { GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency; }
-                    catch { /* best-effort on Mono/older runtimes */ }
+                    try
+                    {
+                        GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
+                        _gcLowLatencyApplied = true;
+                    }
+                    catch
+                    {
+                        /* best-effort on Mono/older runtimes */
+                    }
                 }
 
                 InitGate.Wire();
@@ -432,6 +441,7 @@ namespace MapPerfProbe
                 SafePatch("PatchMapScreenThrottle", () => PatchMapScreenThrottle(harmony));
                 SafePatch("Install MapPauseSkipper", MapPauseSkipper.Install);
                 SafePatch("Install PauseSimSkipper", PauseSimSkipper.Install);
+                SafePatch("Install PausedMapStateThrottler", PausedMapStateThrottler.Install);
 
                 // High-level map/UI hooks (already working)
                 SafePatch("TryPatchType(MapState)", () => TryPatchType(harmony, "TaleWorlds.CampaignSystem.GameState.MapState", new[] { "OnTick", "OnMapModeTick", "OnFrameTick" }));
@@ -577,8 +587,15 @@ namespace MapPerfProbe
             catch (Exception ex)
             {
                 MapPerfLog.Error("OnSubModuleLoad fatal", ex);
-                try { GCSettings.LatencyMode = _prevGcMode; }
-                catch { /* best-effort restore */ }
+                try
+                {
+                    GCSettings.LatencyMode = _prevGcMode;
+                    _gcLowLatencyApplied = false;
+                }
+                catch
+                {
+                    /* best-effort restore */
+                }
                 _didPatch = false; // fail safe, keep game running
             }
         }
@@ -625,8 +642,15 @@ namespace MapPerfProbe
             {
                 MapPerfLog.Error("Unpatch error", ex);
             }
-            try { GCSettings.LatencyMode = _prevGcMode; }
-            catch { /* restore best-effort */ }
+            try
+            {
+                GCSettings.LatencyMode = _prevGcMode;
+                _gcLowLatencyApplied = false;
+            }
+            catch
+            {
+                /* restore best-effort */
+            }
             _didPatch = false;
             FlushSummary(force: true);
             MapPerfLog.Info("=== MapPerfProbe stop ===");
@@ -710,8 +734,15 @@ namespace MapPerfProbe
         private static void DisableRuntime()
         {
             // Reset GC mode and all per-frame gates
-            try { GCSettings.LatencyMode = _prevGcMode; }
-            catch { /* best-effort */ }
+            try
+            {
+                GCSettings.LatencyMode = _prevGcMode;
+                _gcLowLatencyApplied = false;
+            }
+            catch
+            {
+                /* best-effort */
+            }
             _desyncDebtMs = 0.0;
             WriteLastFrameMsSnap(0.0);
             Interlocked.Exchange(ref _frameSeqStamped, 0);
@@ -735,8 +766,15 @@ namespace MapPerfProbe
         private static void EnableRuntime()
         {
             // Restore preferred GC mode when active
-            try { GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency; }
-            catch { /* best-effort */ }
+            try
+            {
+                GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
+                _gcLowLatencyApplied = true;
+            }
+            catch
+            {
+                /* best-effort */
+            }
             _lastSimEveryN = MapPerfConfig.SimTickEveryNSkipped;
             Interlocked.Exchange(ref _simSkipToken, 0);
             _desyncDebtMs = 0.0;
@@ -953,8 +991,15 @@ namespace MapPerfProbe
                 var desired = paused ? GCLatencyMode.Interactive : GCLatencyMode.SustainedLowLatency;
                 if (GCSettings.LatencyMode != desired)
                 {
-                    try { GCSettings.LatencyMode = desired; }
-                    catch { /* best-effort */ }
+                    try
+                    {
+                        GCSettings.LatencyMode = desired;
+                        _gcLowLatencyApplied = desired == GCLatencyMode.SustainedLowLatency;
+                    }
+                    catch
+                    {
+                        /* best-effort */
+                    }
                 }
                 var nowTs = Stopwatch.GetTimestamp();
                 double frameMs = (nowTs - _lastFrameTS) * TicksToMs;
@@ -2289,6 +2334,24 @@ namespace MapPerfProbe
             if (string.Equals(methodName, "OnFrameTick", StringComparison.OrdinalIgnoreCase))
             {
                 var paused = IsPaused();
+                // Toggle GC latency: Interactive while paused, SustainedLowLatency otherwise
+                try
+                {
+                    if (paused && _gcLowLatencyApplied)
+                    {
+                        GCSettings.LatencyMode = GCLatencyMode.Interactive;
+                        _gcLowLatencyApplied = false;
+                    }
+                    else if (!paused && !_gcLowLatencyApplied)
+                    {
+                        GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
+                        _gcLowLatencyApplied = true;
+                    }
+                }
+                catch
+                {
+                    /* ignore */
+                }
                 _mapScreenFastTimeValid = false;
                 _mapScreenThrottleActive = false;
                 _mapHotGate = false;

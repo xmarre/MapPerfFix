@@ -106,6 +106,15 @@ namespace MapPerfProbe
         [SettingPropertyInteger("Cache throttle period (ms)", 50, 5000, RequireRestart = false, Order = 5)]
         public int CachePauseMinIntervalMs { get; set; } = 500;
 
+        [SettingPropertyGroup("Map Performance/Pause", GroupOrder = 2)]
+        [SettingPropertyBool("Throttle MapState while paused",
+            HintText = "Runs MapState.OnMapModeTick only periodically during pause.", RequireRestart = false, Order = 6)]
+        public bool ThrottlePausedMapState { get; set; } = true;
+
+        [SettingPropertyGroup("Map Performance/Pause", GroupOrder = 2)]
+        [SettingPropertyInteger("Paused MapState period (ms)", 30, 5000, RequireRestart = false, Order = 7)]
+        public int PausedMapStateMinIntervalMs { get; set; } = 120;
+
         // -------- Message dedup ----------
         [SettingPropertyGroup("Message Filters", GroupOrder = 10)]
         [SettingPropertyBool("Silence immediate repeats", Order = -2)]
