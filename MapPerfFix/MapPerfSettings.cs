@@ -79,13 +79,32 @@ namespace MapPerfProbe
         [SettingPropertyBool("Hard-skip MapScreen while paused",
             HintText = "Skips MapScreen.OnFrameTick when time is stopped.",
             RequireRestart = false, Order = 0)]
-        public bool HardPauseSkip { get; set; } = true;
+        public bool HardPauseSkip { get; set; } = false;
 
         [SettingPropertyGroup("Map Performance/Pause", GroupOrder = 2)]
         [SettingPropertyBool("Skip party/army visuals while paused",
             HintText = "Stops PartyVisual/ArmyVisual Tick except hovered/selected/tracked and on-screen.",
             RequireRestart = false, Order = 1)]
         public bool SkipPausedVisuals { get; set; } = true;
+
+        [SettingPropertyGroup("Map Performance/Pause", GroupOrder = 2)]
+        [SettingPropertyBool("Skip Campaign.RealTick while paused",
+            HintText = "Verhindert Kampagnen-Sim im Pausenmodus.", RequireRestart = false, Order = 2)]
+        public bool SkipCampaignRealTickWhenPaused { get; set; } = true;
+
+        [SettingPropertyGroup("Map Performance/Pause", GroupOrder = 2)]
+        [SettingPropertyBool("Throttle Cache RealTick while paused",
+            HintText = "Drosselt CampaignTickCacheDataStore.RealTick bei Pause.", RequireRestart = false, Order = 3)]
+        public bool ThrottleCacheWhenPaused { get; set; } = true;
+
+        [SettingPropertyGroup("Map Performance/Pause", GroupOrder = 2)]
+        [SettingPropertyBool("Skip Cache RealTick entirely while paused",
+            HintText = "Überspringt Cache-Updates komplett bei Pause.", RequireRestart = false, Order = 4)]
+        public bool SkipCacheRealTickWhenPaused { get; set; } = false;
+
+        [SettingPropertyGroup("Map Performance/Pause", GroupOrder = 2)]
+        [SettingPropertyInteger("Cache throttle period (ms)", 50, 5000, RequireRestart = false, Order = 5)]
+        public int CachePauseMinIntervalMs { get; set; } = 500;
 
         // -------- Message dedup ----------
         [SettingPropertyGroup("Message Filters", GroupOrder = 10)]
