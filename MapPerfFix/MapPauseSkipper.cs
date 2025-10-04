@@ -155,21 +155,21 @@ namespace MapPerfProbe
             var key = (Type: type, Name: name);
             var member = _boolCache.GetOrAdd(key, k =>
             {
-                var fi = AccessTools.Field(k.Type, k.Name);
-                if (fi != null && fi.FieldType == typeof(bool)) return (MemberInfo)fi;
+                var fieldLookup = AccessTools.Field(k.Type, k.Name);
+                if (fieldLookup != null && fieldLookup.FieldType == typeof(bool)) return (MemberInfo)fieldLookup;
 
-                var pi = AccessTools.Property(k.Type, k.Name);
-                if (pi != null && pi.PropertyType == typeof(bool)) return (MemberInfo)pi;
+                var propertyLookup = AccessTools.Property(k.Type, k.Name);
+                if (propertyLookup != null && propertyLookup.PropertyType == typeof(bool)) return (MemberInfo)propertyLookup;
 
                 return null;
             });
 
-            var fi = member as FieldInfo;
-            if (fi != null)
+            var fieldInfo = member as FieldInfo;
+            if (fieldInfo != null)
             {
                 try
                 {
-                    return (bool)fi.GetValue(instance);
+                    return (bool)fieldInfo.GetValue(instance);
                 }
                 catch
                 {
@@ -177,12 +177,12 @@ namespace MapPerfProbe
                 }
             }
 
-            var pi = member as PropertyInfo;
-            if (pi != null)
+            var propertyInfo = member as PropertyInfo;
+            if (propertyInfo != null)
             {
                 try
                 {
-                    var getter = pi.GetMethod;
+                    var getter = propertyInfo.GetMethod;
                     return getter != null ? (bool)getter.Invoke(instance, Array.Empty<object>()) : (bool?)null;
                 }
                 catch
