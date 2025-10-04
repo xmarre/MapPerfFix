@@ -11,7 +11,8 @@ namespace MapPerfProbe
     internal static class MapPauseSkipper
     {
         private static readonly string HarmonyId = SubModule.HarmonyId + ".pause-skipper";
-        private static readonly ConcurrentDictionary<(Type Type, string Name), MemberInfo> _boolCache = new();
+        private static readonly ConcurrentDictionary<(Type Type, string Name), MemberInfo> _boolCache =
+            new ConcurrentDictionary<(Type Type, string Name), MemberInfo>();
         private static Harmony _harmony;
 
         internal static void Install()
@@ -150,22 +151,24 @@ namespace MapPerfProbe
         private static bool? GetBool(Type type, object instance, string name)
         {
             if (type == null) return null;
-            var member = _boolCache.GetOrAdd((type, name), static key =>
+            var key = (Type: type, Name: name);
+            var member = _boolCache.GetOrAdd(key, k =>
             {
-                var field = AccessTools.Field(key.Type, key.Name);
-                if (field != null && field.FieldType == typeof(bool)) return field;
+                var fi_l = AccessTools.Field(k.Type, k.Name);
+                if (fi_l != null && fi_l.FieldType == typeof(bool)) return (MemberInfo)fi_l;
 
-                var property = AccessTools.Property(key.Type, key.Name);
-                if (property != null && property.PropertyType == typeof(bool)) return property;
+                var pi_l = AccessTools.Property(k.Type, k.Name);
+                if (pi_l != null && pi_l.PropertyType == typeof(bool)) return (MemberInfo)pi_l;
 
                 return null;
             });
 
-            if (member is FieldInfo field)
+            var fi = member as FieldInfo;
+            if (fi != null)
             {
                 try
                 {
-                    return (bool)field.GetValue(instance);
+                    return (bool)fi.GetValue(instance);
                 }
                 catch
                 {
@@ -173,12 +176,13 @@ namespace MapPerfProbe
                 }
             }
 
-            if (member is PropertyInfo property)
+            var pi = member as PropertyInfo;
+            if (pi != null)
             {
                 try
                 {
-                    var getter = property.GetMethod;
-                    return getter != null ? (bool)getter.Invoke(instance, Array.Empty<object>()) : (bool?)null;
+                    var getter = pi.GetMethod;
+                    return getter != null ? (bool)getter.Invoke(instance, new object[0]) : (bool?)null;
                 }
                 catch
                 {
