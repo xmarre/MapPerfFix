@@ -203,6 +203,8 @@ namespace MapPerfProbe
         }
         private static void ClearRunGates()
         {
+            InitGate.Reset();
+            PauseSimSkipper.ResetCacheGate();
             _lastDailyIdx.Clear();
             _lastHourlyIdx.Clear();
             _lastWeeklyIdx.Clear();
@@ -375,6 +377,8 @@ namespace MapPerfProbe
             _didPatch = true;
             MapPerfLog.Info("=== MapPerfProbe start ===");
 
+            InitGate.Reset();
+
             try { _ = MapPerfSettings.Instance; }
             catch { /* ignore if MCM not present */ }
 
@@ -420,6 +424,8 @@ namespace MapPerfProbe
                     try { GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency; }
                     catch { /* best-effort on Mono/older runtimes */ }
                 }
+
+                InitGate.Wire();
 
                 // IMPORTANT: after bootstrapping the deferrer assembly, apply the throttle patch
                 // before broader instrumentation so its bool-prefix can skip the original when needed.
@@ -2269,6 +2275,14 @@ namespace MapPerfProbe
             // Master switch: never throttle when disabled
             if (!MapPerfConfig.Enabled) return true;
 
+            if (!InitGate.MapReady())
+            {
+                _mapScreenThrottleActive = false;
+                _skipMapOnFrameTick = false;
+                _mapHotGate = false;
+                return true;
+            }
+
             var methodName = __originalMethod?.Name;
             if (methodName == null) return true;
 
@@ -3065,6 +3079,13 @@ namespace MapPerfProbe
 
             if (!MapPerfConfig.Enabled)
             {
+                __state.Flags = StateFlagSkip;
+                return;
+            }
+
+            if (!InitGate.MapReady())
+            {
+                _skipMapOnFrameTick = false;
                 __state.Flags = StateFlagSkip;
                 return;
             }

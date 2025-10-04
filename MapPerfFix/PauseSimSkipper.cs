@@ -14,6 +14,11 @@ namespace MapPerfProbe
         private static long _lastCacheTicks;
         private static readonly double TicksToMs = 1000.0 / Stopwatch.Frequency;
 
+        internal static void ResetCacheGate()
+        {
+            _lastCacheTicks = 0;
+        }
+
         internal static void Install()
         {
             if (_harmony != null) return;
@@ -85,10 +90,11 @@ namespace MapPerfProbe
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool Campaign_RealTick_Prefix()
-            => !(MapPerfConfig.SkipCampaignRealTickWhenPaused && IsPaused());
+            => !(MapPerfConfig.SkipCampaignRealTickWhenPaused && InitGate.MapReady() && IsPaused());
 
         private static bool Cache_RealTick_Prefix(ref float dt)
         {
+            if (!InitGate.MapReady()) return true;
             if (!IsPaused()) return true;
             if (!MapPerfConfig.ThrottleCacheWhenPaused) return true;
 

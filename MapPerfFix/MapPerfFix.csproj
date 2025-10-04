@@ -96,6 +96,7 @@
     <Compile Include="MapPerfConfig.cs" />
     <Compile Include="MapIdleDrainProbe.cs" />
     <Compile Include="MapIdleDrainMitigator.cs" />
+    <Compile Include="InitGate.cs" />
     <Compile Include="MapPauseSkipper.cs" />
     <Compile Include="PauseSimSkipper.cs" />
     <Compile Include="MapPerfLog.cs" />
