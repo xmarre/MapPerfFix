@@ -1,0 +1,13 @@
+name: Safety invariant
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify-authoritative-ticks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify no authoritative campaign callbacks are skipped or deferred
+        run: python3 tools/verify_safety.py
