@@ -11,7 +11,7 @@ The project also built `MapPerfProbe.dll` while `SubModule.xml` attempted to loa
 ## Safe optimizations
 
 - Switches the .NET GC latency mode only while the campaign map is active.
-- Reduces confirmed off-screen `PartyVisual.Tick(float)` work only while campaign time is stopped.
+- Reduces confirmed off-screen `PartyVisual.Tick` rendering work only while campaign time is stopped. The resolver supports the current `Tick(float, ref int, ref PartyVisual[])` signature and the legacy single-argument `Tick(float)` signature. Unknown signatures fail open and are not patched.
 - Runs every campaign, map-state, periodic, save, UI, and behavior callback at its original time and on its original call path.
 - Refuses the visual optimization when another mod patches the same method or when required visibility members cannot be verified.
 
@@ -41,4 +41,4 @@ python3 tools/verify_safety.py
 
 A generic frame-time patch cannot make expensive campaign simulation free. This module reduces rendering and managed-runtime overhead only. Expensive synchronous campaign events still take their real execution time; they are never moved to a later frame or silently dropped.
 
-The repository safety check rejects compilation of the old simulation-deferral sources and rejects references to authoritative campaign tick hooks in compiled code.
+The repository safety check uses an explicit allowlist for the reviewed `PartyVisual.Tick` patch path and rejects every other Harmony patch surface in compiled code.
