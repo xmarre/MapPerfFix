@@ -231,7 +231,8 @@ namespace MapPerfProbe
                 _nextCompatibilityFrame =
                     Volatile.Read(ref _frameSequence) + CompatibilityCheckFrames;
                 _nextVisualReportTimestamp =
-                    Stopwatch.GetTimestamp() + Stopwatch.Frequency * 30L;
+                    Stopwatch.GetTimestamp() +
+                    Stopwatch.Frequency * MapPerfConfig.ProfilerReportIntervalSeconds;
 
                 MapPerfLog.Info(
                     "Installed legacy hidden mobile-party visual optimization on " +
