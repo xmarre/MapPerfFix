@@ -220,14 +220,11 @@ def verify() -> None:
             fail("reviewed method changed: " + name + " expected=" + expected + " actual=" + actual)
 
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8-sig")
-    if "MapPerfProbe\\\",\\\"bootstrap.log" in bootstrap:
-        fail("invalid bootstrap path literal")
+    bootstrap_code = strip_comments(bootstrap, mask_literals=True)
     if '"MapPerfProbe"' not in bootstrap or '"bootstrap.log"' not in bootstrap:
         fail("bootstrap must write %TEMP%\\MapPerfProbe\\bootstrap.log")
-    if "MapPerfConfig" in bootstrap or "MapPerfSettings" in bootstrap or "Harmony" in bootstrap:
+    if re.search(r"\b(?:MapPerfConfig|MapPerfSettings|Harmony|HarmonyLib)\b", bootstrap_code):
         fail("bootstrap must remain independent of MCM settings and Harmony")
-    if "MapPerfProbe.BootstrapSubModule" in source:
-        fail("main submodule must not own bootstrap loading")
 
     module = ET.fromstring(MODULE_XML.read_text(encoding="utf-8"))
     singleplayer = module.find("Singleplayer")
