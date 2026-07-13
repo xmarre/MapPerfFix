@@ -14,6 +14,7 @@ SUBMODULE = ROOT / "MapPerfFix" / "SubModule.cs"
 BOOTSTRAP = ROOT / "MapPerfFix" / "BootstrapSubModule.cs"
 ASSEMBLY_INFO = ROOT / "MapPerfFix" / "Properties" / "AssemblyInfo.cs"
 VERSION_FILE = ROOT / "version.txt"
+MAX_MODULE_XML_BYTES = 64 * 1024
 
 EXPECTED_COMPILED = {
     "BootstrapSubModule.cs",
@@ -161,6 +162,30 @@ def method_hash(source: str, name: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def parse_bounded_module_xml(path: Path) -> ET.Element:
+    data = path.read_bytes()
+    if len(data) > MAX_MODULE_XML_BYTES:
+        fail(
+            "SubModule.xml exceeds the " + str(MAX_MODULE_XML_BYTES) +
+            " byte verification limit"
+        )
+
+    upper = data.upper()
+    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+        fail("SubModule.xml must not contain DTD or entity declarations")
+
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exception:
+        fail("SubModule.xml is not valid UTF-8: " + str(exception))
+
+    try:
+        parser = ET.XMLParser(target=ET.TreeBuilder())
+        return ET.fromstring(text, parser=parser)
+    except ET.ParseError as exception:
+        fail("SubModule.xml is not valid XML: " + str(exception))
+
+
 def verify() -> None:
     project = PROJECT.read_text(encoding="utf-8")
     compiled = {
@@ -227,7 +252,15 @@ def verify() -> None:
         fail("bootstrap must write %TEMP%\\MapPerfProbe\\bootstrap.log")
     if re.search(r"\b(?:MapPerfConfig|MapPerfSettings|Harmony|HarmonyLib)\b", bootstrap_code):
         fail("bootstrap must remain independent of MCM settings and Harmony")
-    if 'TryWriteBootstrapSentinel("entered OnSubModuleLoad")' not in bootstrap:
+
+    bootstrap_entry = strip_comments(
+        extract_method(bootstrap, "OnSubModuleLoad"),
+        mask_literals=False,
+    )
+    if re.search(
+        r'\bTryWriteBootstrapSentinel\s*\(\s*"entered OnSubModuleLoad"\s*\)',
+        bootstrap_entry,
+    ) is None:
         fail("bootstrap entry sentinel must use the fail-open wrapper")
     if "Assembly.GetName().Version" not in bootstrap:
         fail("bootstrap must derive its displayed version from the compiled assembly")
@@ -235,19 +268,23 @@ def verify() -> None:
         fail("bootstrap must not duplicate the authoritative semantic version")
 
     version = VERSION_FILE.read_text(encoding="utf-8").strip()
-    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
-        fail("version.txt must contain MAJOR.MINOR.PATCH")
+    version_pattern = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    if re.fullmatch(version_pattern, version) is None:
+        fail("version.txt must contain canonical MAJOR.MINOR.PATCH")
 
     assembly_info = ASSEMBLY_INFO.read_text(encoding="utf-8")
+    assembly_code = strip_comments(assembly_info, mask_literals=False)
     assembly_version = version + ".0"
-    if '[assembly: AssemblyVersion("' + assembly_version + '")]' not in assembly_info:
-        fail("AssemblyVersion is not synchronized with version.txt")
-    if '[assembly: AssemblyFileVersion("' + assembly_version + '")]' not in assembly_info:
-        fail("AssemblyFileVersion is not synchronized with version.txt")
+    for attribute in ("AssemblyVersion", "AssemblyFileVersion"):
+        values = re.findall(
+            r'\[\s*assembly\s*:\s*' + attribute +
+            r'\s*\(\s*"([^"]+)"\s*\)\s*\]',
+            assembly_code,
+        )
+        if values != [assembly_version]:
+            fail(attribute + " is not synchronized with version.txt")
 
-    # SubModule.xml is trusted repository input. Standard-library parsing keeps
-    # this verifier hermetic and does not add a network-installed dependency.
-    module = ET.fromstring(MODULE_XML.read_text(encoding="utf-8"))
+    module = parse_bounded_module_xml(MODULE_XML)
     module_version = module.find("Version")
     if module_version is None or module_version.attrib.get("value") != "v" + version:
         fail("SubModule.xml version is not synchronized with version.txt")
