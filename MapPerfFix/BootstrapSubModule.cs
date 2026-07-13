@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Reflection;
 using TaleWorlds.MountAndBlade;
 
 namespace MapPerfProbe
@@ -11,6 +12,8 @@ namespace MapPerfProbe
     public sealed class BootstrapSubModule : MBSubModuleBase
     {
         private static readonly string Version = ResolveVersion();
+
+        internal static string VersionText => Version;
 
         protected override void OnSubModuleLoad()
         {
@@ -43,6 +46,24 @@ namespace MapPerfProbe
             }
         }
 
+        protected override void OnBeforeInitialModuleScreenSetAsRoot()
+        {
+            try
+            {
+                base.OnBeforeInitialModuleScreenSetAsRoot();
+            }
+            catch (Exception exception)
+            {
+                TryWriteBootstrapSentinel(
+                    "MBSubModuleBase.OnBeforeInitialModuleScreenSetAsRoot failed: " +
+                    exception.GetType().FullName + ": " + exception.Message);
+            }
+
+            TryWriteBootstrapSentinel("entered OnBeforeInitialModuleScreenSetAsRoot");
+            TryShowStatusMessage(
+                "MapPerfProbe " + Version + " LOADED. Log: " + MapPerfLog.CurrentPath);
+        }
+
         private static void TryWriteBootstrapSentinel(string message)
         {
             try
@@ -62,15 +83,24 @@ namespace MapPerfProbe
                        " | assembly=" + SafeAssemblyLocation() +
                        Environment.NewLine;
 
+            var assemblyDirectory = SafeAssemblyDirectory();
+            if (!string.IsNullOrEmpty(assemblyDirectory))
+            {
+                TryWriteText(
+                    Path.Combine(assemblyDirectory, "MapPerfProbe.loaded.txt"),
+                    line);
+                TryAppend(
+                    Path.Combine(assemblyDirectory, "MapPerfProbe-bootstrap.log"),
+                    line);
+            }
+
             var temp = SafeTempPath();
-            if (!string.IsNullOrEmpty(temp) &&
-                TryAppend(Path.Combine(temp, "MapPerfProbe", "bootstrap.log"), line))
-                return;
+            if (!string.IsNullOrEmpty(temp))
+                TryAppend(Path.Combine(temp, "MapPerfProbe", "bootstrap.log"), line);
 
             var local = SafeFolder(Environment.SpecialFolder.LocalApplicationData);
-            if (!string.IsNullOrEmpty(local) &&
-                TryAppend(Path.Combine(local, "MapPerfProbe", "bootstrap.log"), line))
-                return;
+            if (!string.IsNullOrEmpty(local))
+                TryAppend(Path.Combine(local, "MapPerfProbe", "bootstrap.log"), line);
 
             var baseDirectory = SafeBaseDirectory();
             if (!string.IsNullOrEmpty(baseDirectory))
@@ -97,6 +127,74 @@ namespace MapPerfProbe
             catch
             {
                 return false;
+            }
+        }
+
+        private static bool TryWriteText(string path, string text)
+        {
+            if (string.IsNullOrEmpty(path))
+                return false;
+
+            try
+            {
+                var directory = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(directory))
+                    Directory.CreateDirectory(directory);
+                File.WriteAllText(path, text);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void TryShowStatusMessage(string text)
+        {
+            try
+            {
+                var messageType = Type.GetType(
+                    "TaleWorlds.Library.InformationMessage, TaleWorlds.Library",
+                    false);
+                var managerType = Type.GetType(
+                    "TaleWorlds.Library.InformationManager, TaleWorlds.Library",
+                    false);
+                if (messageType == null || managerType == null)
+                {
+                    TryWriteBootstrapSentinel(
+                        "startup status API was not found in TaleWorlds.Library");
+                    return;
+                }
+
+                var constructor = messageType.GetConstructor(new[] { typeof(string) });
+                if (constructor == null)
+                {
+                    TryWriteBootstrapSentinel(
+                        "InformationMessage(string) constructor was not found");
+                    return;
+                }
+
+                var display = managerType.GetMethod(
+                    "DisplayMessage",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new[] { messageType },
+                    null);
+                if (display == null)
+                {
+                    TryWriteBootstrapSentinel(
+                        "InformationManager.DisplayMessage was not found");
+                    return;
+                }
+
+                var status = constructor.Invoke(new object[] { text });
+                display.Invoke(null, new[] { status });
+            }
+            catch (Exception exception)
+            {
+                TryWriteBootstrapSentinel(
+                    "startup status display failed: " + exception.GetType().FullName +
+                    ": " + exception.Message);
             }
         }
 
@@ -131,6 +229,21 @@ namespace MapPerfProbe
         {
             try { return AppDomain.CurrentDomain.BaseDirectory; }
             catch { return string.Empty; }
+        }
+
+        private static string SafeAssemblyDirectory()
+        {
+            try
+            {
+                var location = typeof(BootstrapSubModule).Assembly.Location;
+                return string.IsNullOrEmpty(location)
+                    ? string.Empty
+                    : Path.GetDirectoryName(location) ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
         }
 
         private static string SafeAssemblyLocation()
