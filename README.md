@@ -27,15 +27,44 @@ The profiler is enabled by default so the remaining campaign simulation hotspot 
 
 The module can select a lower-latency .NET GC mode while the campaign map is active. This changes managed-runtime collection policy only.
 
-## Logging
+## Proving that the module is running
 
-Version 2.1.1 loads a minimal bootstrap submodule before the MCM-dependent main submodule. It writes an early sentinel before MCM settings or Harmony are touched:
+Version 2.1.2 uses Bannerlord's current module manifest schema and provides three independent runtime indicators.
+
+### 1. Main-menu status
+
+After Bannerlord finishes creating its initial module screen, the bootstrap displays:
+
+```text
+MapPerfProbe 2.1.2 LOADED. Log: <selected probe.log path>
+```
+
+The status API is resolved from `TaleWorlds.Library`, where Bannerlord actually defines `InformationManager` and `InformationMessage`.
+
+### 2. Marker beside the loaded DLL
+
+When `MapPerfProbe.dll` is instantiated, the bootstrap attempts to create these files in the same directory as the DLL Bannerlord loaded:
+
+```text
+MapPerfProbe.loaded.txt
+MapPerfProbe-bootstrap.log
+```
+
+`MapPerfProbe.loaded.txt` is overwritten on each load and includes the exact assembly path. Its presence proves that this specific DLL was loaded.
+
+### 3. Bootstrap logs
+
+The bootstrap also appends to every writable diagnostic location:
 
 ```text
 %TEMP%\MapPerfProbe\bootstrap.log
+%LOCALAPPDATA%\MapPerfProbe\bootstrap.log
+<Bannerlord executable directory>\MapPerfProbe-bootstrap.log
 ```
 
-The sentinel includes the exact `MapPerfProbe.dll` path loaded by Bannerlord. If this file is absent after launching with the module enabled, Bannerlord did not load the DLL or did not instantiate the bootstrap submodule.
+If there is no main-menu message, no adjacent marker, and no bootstrap log, Bannerlord did not instantiate `MapPerfProbe.BootstrapSubModule`. Check the installed `SubModule.xml`, enabled module state, DLL location, and dependency/load-order errors.
+
+## Runtime log
 
 After bootstrap, MapPerfProbe creates `probe.log` and displays its selected path in game. It also mirrors log lines to Bannerlord's engine debug output when that API is available.
 
@@ -60,9 +89,7 @@ The log includes:
 - individual slow TOR callbacks;
 - aggregate TOR callback reports every 30 seconds by default.
 
-## Module identity
-
-The established loader contract remains:
+## Module identity and manifest
 
 ```text
 Module ID: MapPerfProbe
@@ -71,7 +98,15 @@ Bootstrap: MapPerfProbe.BootstrapSubModule
 Main:      MapPerfProbe.SubModule
 ```
 
-The descriptor uses the original `Singleplayer=true` / `Multiplayer=false` schema and does not require `StoryMode`, allowing TOR sandbox loadouts to instantiate the module.
+The descriptor uses Bannerlord's current schema:
+
+```text
+DefaultModule=false
+ModuleCategory=Singleplayer
+ModuleType=Community
+```
+
+Each submodule contains the required `Assemblies` element. `StoryMode` is not a hard dependency, allowing TOR sandbox loadouts to instantiate the module.
 
 ## Requirements
 
@@ -89,10 +124,19 @@ msbuild MapPerfFix.sln /p:Configuration=Release /p:Platform=x64 /p:BannerlordDir
 
 The output is `MapPerfProbe.dll`, matching `SubModule.xml`.
 
+To verify the installed DLL version in PowerShell:
+
+```powershell
+[Reflection.AssemblyName]::GetAssemblyName("D:\Path\To\MapPerfProbe.dll").Version
+```
+
+The expected version for this fix is `2.1.2.0`.
+
 ## Safety verification
 
 ```bash
+python3 tools/sync_version.py --check
 python3 tools/verify_safety.py
 ```
 
-The verifier rejects the removed simulation-deferral sources, direct campaign tick hooks, deferred work queues, unreviewed Harmony patch surfaces, the wrong loader schema, and a hard `StoryMode` dependency. The only method permitted to skip an original call is the fully-hidden legacy party-visual prefix.
+The verifier rejects the removed simulation-deferral sources, direct campaign tick hooks, deferred work queues, unreviewed Harmony patch surfaces, obsolete loader tags, invalid module/submodule element order, missing `Assemblies` nodes, the wrong DLL name, and a hard `StoryMode` dependency. The only method permitted to skip an original call is the fully-hidden legacy party-visual prefix.

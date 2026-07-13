@@ -549,38 +549,9 @@ namespace MapPerfProbe
 
         private static void TryShowStatusMessage()
         {
-            try
-            {
-                var messageType = Type.GetType(
-                    "TaleWorlds.Core.InformationMessage, TaleWorlds.Core", false);
-                var managerType = Type.GetType(
-                    "TaleWorlds.Core.InformationManager, TaleWorlds.Core", false);
-                if (messageType == null || managerType == null)
-                    return;
-
-                var constructor = messageType.GetConstructor(new[] { typeof(string) });
-                if (constructor == null)
-                    return;
-
-                var display = managerType.GetMethod(
-                    "DisplayMessage",
-                    BindingFlags.Public | BindingFlags.Static,
-                    null,
-                    new[] { messageType },
-                    null);
-                if (display == null)
-                    return;
-
-                var message = constructor.Invoke(new object[]
-                {
-                    "MapPerfProbe loaded. Log: " + MapPerfLog.CurrentPath
-                });
-                display.Invoke(null, new[] { message });
-            }
-            catch (Exception exception)
-            {
-                MapPerfLog.Debug("Could not display startup status: " + exception.Message);
-            }
+            BootstrapSubModule.TryShowStatusMessage(
+                "MapPerfProbe " + BootstrapSubModule.VersionText +
+                " active. Log: " + MapPerfLog.CurrentPath);
         }
 
         private sealed class HiddenPartyVisualAccessors
