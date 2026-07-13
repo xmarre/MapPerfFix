@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Module>
-  <Name value="Map Performance Fix" />
+  <Name value="MapPerfProbe" />
   <Id value="MapPerfProbe" />
   <Version value="v2.0.0" />
   <Singleplayer value="true" />
@@ -14,8 +14,8 @@
   </DependedModules>
   <SubModules>
     <SubModule>
-      <Name value="Map Performance Fix" />
-      <DLLName value="MapPerfFix.dll" />
+      <Name value="MapPerfProbe SubModule" />
+      <DLLName value="MapPerfProbe.dll" />
       <SubModuleClassType value="MapPerfProbe.SubModule" />
       <Tags>
         <Tag key="DedicatedServerType" value="none" />
