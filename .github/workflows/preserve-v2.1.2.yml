@@ -4,12 +4,16 @@ on:
   push:
     branches:
       - automation/preserve-v2.1.2
+  pull_request:
+    branches:
+      - master
 
 permissions:
   contents: write
 
 jobs:
   preserve-release:
+    if: github.event_name == 'push' || github.head_ref == 'automation/preserve-v2.1.2'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
