@@ -12,6 +12,8 @@ PROJECT = ROOT / "MapPerfFix" / "MapPerfFix.csproj"
 MODULE_XML = ROOT / "MapPerfFix" / "SubModule.xml"
 SUBMODULE = ROOT / "MapPerfFix" / "SubModule.cs"
 BOOTSTRAP = ROOT / "MapPerfFix" / "BootstrapSubModule.cs"
+ASSEMBLY_INFO = ROOT / "MapPerfFix" / "Properties" / "AssemblyInfo.cs"
+VERSION_FILE = ROOT / "version.txt"
 
 EXPECTED_COMPILED = {
     "BootstrapSubModule.cs",
@@ -225,8 +227,31 @@ def verify() -> None:
         fail("bootstrap must write %TEMP%\\MapPerfProbe\\bootstrap.log")
     if re.search(r"\b(?:MapPerfConfig|MapPerfSettings|Harmony|HarmonyLib)\b", bootstrap_code):
         fail("bootstrap must remain independent of MCM settings and Harmony")
+    if 'TryWriteBootstrapSentinel("entered OnSubModuleLoad")' not in bootstrap:
+        fail("bootstrap entry sentinel must use the fail-open wrapper")
+    if "Assembly.GetName().Version" not in bootstrap:
+        fail("bootstrap must derive its displayed version from the compiled assembly")
+    if re.search(r'\bVersion\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"', bootstrap):
+        fail("bootstrap must not duplicate the authoritative semantic version")
 
+    version = VERSION_FILE.read_text(encoding="utf-8").strip()
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+        fail("version.txt must contain MAJOR.MINOR.PATCH")
+
+    assembly_info = ASSEMBLY_INFO.read_text(encoding="utf-8")
+    assembly_version = version + ".0"
+    if '[assembly: AssemblyVersion("' + assembly_version + '")]' not in assembly_info:
+        fail("AssemblyVersion is not synchronized with version.txt")
+    if '[assembly: AssemblyFileVersion("' + assembly_version + '")]' not in assembly_info:
+        fail("AssemblyFileVersion is not synchronized with version.txt")
+
+    # SubModule.xml is trusted repository input. Standard-library parsing keeps
+    # this verifier hermetic and does not add a network-installed dependency.
     module = ET.fromstring(MODULE_XML.read_text(encoding="utf-8"))
+    module_version = module.find("Version")
+    if module_version is None or module_version.attrib.get("value") != "v" + version:
+        fail("SubModule.xml version is not synchronized with version.txt")
+
     singleplayer = module.find("Singleplayer")
     multiplayer = module.find("Multiplayer")
     if singleplayer is None or singleplayer.attrib.get("value") != "true":
@@ -247,14 +272,21 @@ def verify() -> None:
             fail("required module dependency is missing: " + required)
 
     submodules = module.findall("./SubModules/SubModule")
-    class_types = {
-        node.attrib.get("value")
-        for node in module.findall("./SubModules/SubModule/SubModuleClassType")
-    }
-    if class_types != {"MapPerfProbe.BootstrapSubModule", "MapPerfProbe.SubModule"}:
-        fail("SubModule.xml must load bootstrap and main submodules")
     if len(submodules) != 2:
         fail("SubModule.xml must contain exactly two submodules")
+    class_types = []
+    for node in submodules:
+        class_type = node.find("SubModuleClassType")
+        class_types.append(None if class_type is None else class_type.attrib.get("value"))
+    expected_class_types = [
+        "MapPerfProbe.BootstrapSubModule",
+        "MapPerfProbe.SubModule",
+    ]
+    if class_types != expected_class_types:
+        fail(
+            "SubModule.xml must load BootstrapSubModule first and SubModule second; got " +
+            repr(class_types)
+        )
     for node in submodules:
         dll = node.find("DLLName")
         if dll is None or dll.attrib.get("value") != "MapPerfProbe.dll":
