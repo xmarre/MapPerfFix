@@ -361,7 +361,20 @@ def verify() -> None:
     }
     if "StoryMode" in dependencies:
         fail("StoryMode must not be a hard dependency for TOR sandbox campaigns")
-    for required in ("Native", "SandBoxCore", "Sandbox", "Bannerlord.Harmony", "MCMv5"):
+    if "MCMv5" in dependencies:
+        fail("obsolete MCM module ID is forbidden; use Bannerlord.MBOptionScreen")
+
+    for dependency in module.findall("./DependedModules/DependedModule"):
+        dependent_version = dependency.attrib.get("DependentVersion")
+        if dependent_version and re.fullmatch(
+            r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?",
+            dependent_version,
+        ) is None:
+            fail(
+                "dependency version must be a complete dotted version: " +
+                dependency.attrib.get("Id", "<missing>") + "=" + dependent_version
+            )
+    for required in ("Native", "SandBoxCore", "Sandbox", "Bannerlord.Harmony", "Bannerlord.MBOptionScreen"):
         if required not in dependencies:
             fail("required module dependency is missing: " + required)
 
