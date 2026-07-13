@@ -3,6 +3,7 @@ name: Preserve MapPerfProbe 2.1.2
 on:
   push:
     branches:
+      - master
       - automation/preserve-v2.1.2
   pull_request:
     branches:
