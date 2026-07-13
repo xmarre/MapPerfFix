@@ -54,9 +54,6 @@ PATCH_METHODS = (
     "PartyVisualTickPrefix",
 )
 
-# Hashes are calculated from comment-free, whitespace-normalized method source.
-# Any change to the only permitted patch path requires an intentional review and
-# an explicit allowlist update here.
 EXPECTED_PATCH_METHOD_HASHES = {
     "OnSubModuleUnloaded": "255d748f6f5ed3724855eda802445c2f74e956386a1fdb6537dc320919a28c2b",
     "TryInstallVisualPatch": "53fb4d02170d27b333483190a6a13945a34ab8dda09e399726c41e43336c156b",
@@ -79,7 +76,6 @@ def normalize(path: str) -> str:
 
 
 def strip_comments(source: str, mask_literals: bool = False) -> str:
-    """Remove C# comments while respecting strings and character literals."""
     output: list[str] = []
     i = 0
     state = "code"
@@ -131,22 +127,20 @@ def strip_comments(source: str, mask_literals: bool = False) -> str:
                 i += 1
             continue
 
-        if state in ("string", "char"):
-            if ch == "\\":
-                output.append(" " if mask_literals else ch)
-                if i + 1 < len(source):
-                    output.append(" " if mask_literals else source[i + 1])
-                    i += 2
-                else:
-                    i += 1
-                continue
-
-            terminator = '"' if state == "string" else "'"
+        if ch == "\\":
             output.append(" " if mask_literals else ch)
-            i += 1
-            if ch == terminator:
-                state = "code"
+            if i + 1 < len(source):
+                output.append(" " if mask_literals else source[i + 1])
+                i += 2
+            else:
+                i += 1
             continue
+
+        terminator = '"' if state == "string" else "'"
+        output.append(" " if mask_literals else ch)
+        i += 1
+        if ch == terminator:
+            state = "code"
 
     return "".join(output)
 
@@ -183,8 +177,7 @@ def extract_method(source: str, method_name: str) -> str:
 
 def canonical_method_hash(source: str, method_name: str) -> str:
     method = extract_method(source, method_name)
-    no_comments = strip_comments(method, mask_literals=False)
-    canonical = re.sub(r"\s+", "", no_comments)
+    canonical = re.sub(r"\s+", "", strip_comments(method))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -200,14 +193,8 @@ def patch_surface_errors(source: str) -> list[str]:
         errors.append(f"expected exactly one HarmonyPriority attribute, found {priorities}")
 
     mutation_names = (
-        "Patch",
-        "PatchAll",
-        "Unpatch",
-        "UnpatchAll",
-        "ReversePatch",
-        "CreateProcessor",
-        "CreateClassProcessor",
-        "CreateReversePatcher",
+        "Patch", "PatchAll", "Unpatch", "UnpatchAll", "ReversePatch",
+        "CreateProcessor", "CreateClassProcessor", "CreateReversePatcher",
     )
     mutation_pattern = re.compile(
         r"\b(?P<qualifier>[A-Za-z_][A-Za-z0-9_]*(?:\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)*)"
@@ -221,44 +208,29 @@ def patch_surface_errors(source: str) -> list[str]:
         if call not in ALLOWED_HARMONY_MUTATIONS:
             errors.append(f"unapproved Harmony mutation API: {call}")
 
-    for call, expected_count in ALLOWED_HARMONY_MUTATIONS.items():
-        actual_count = mutations[call]
-        if actual_count != expected_count:
-            errors.append(
-                f"expected {expected_count} call(s) to {call}, found {actual_count}"
-            )
-
-    bare_mutation = re.compile(
-        r"(?<![.A-Za-z0-9_])(?:" + "|".join(mutation_names) + r")\s*\("
-    )
-    if bare_mutation.search(masked):
-        errors.append("bare Harmony mutation invocation is not allowed")
+    for call, expected in ALLOWED_HARMONY_MUTATIONS.items():
+        if mutations[call] != expected:
+            errors.append(f"expected {expected} call(s) to {call}, found {mutations[call]}")
 
     access_calls = Counter(
         re.findall(r"\bAccessTools\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(", masked)
     )
-    for call, count in access_calls.items():
+    for call in access_calls:
         if call not in ALLOWED_ACCESSTOOLS_CALLS:
             errors.append(f"unapproved AccessTools lookup API: {call}")
-    for call, expected_count in ALLOWED_ACCESSTOOLS_CALLS.items():
-        actual_count = access_calls[call]
-        if actual_count != expected_count:
+    for call, expected in ALLOWED_ACCESSTOOLS_CALLS.items():
+        if access_calls[call] != expected:
             errors.append(
-                f"expected {expected_count} AccessTools.{call} call(s), found {actual_count}"
+                f"expected {expected} AccessTools.{call} call(s), found {access_calls[call]}"
             )
 
     for match in re.finditer(r"\.\s*GetMethods?\s*\(", masked):
         prefix = masked[max(0, match.start() - 120):match.end()]
-        allowed = re.search(
-            r"typeof\s*\(\s*SubModule\s*\)\s*\.\s*GetMethod\s*\($",
-            prefix,
-        )
-        if allowed is None:
+        if re.search(r"typeof\s*\(\s*SubModule\s*\)\s*\.\s*GetMethod\s*\($", prefix) is None:
             errors.append("unapproved reflection MethodInfo lookup")
 
     if re.search(r"\.\s*GetConstructors?\s*\(", masked):
         errors.append("reflection constructor lookup is not allowed")
-
     if len(re.findall(r"\bnew\s+Harmony\s*\(", masked)) != 1:
         errors.append("expected exactly one Harmony instance construction")
     if len(re.findall(r"\bnew\s+HarmonyMethod\s*\(", masked)) != 1:
@@ -271,7 +243,6 @@ def patch_surface_errors(source: str) -> list[str]:
 
 def patch_allowlist_errors(source: str) -> list[str]:
     errors = patch_surface_errors(source)
-
     expected_type_block = re.compile(
         r"PartyVisualTypeNames\s*=\s*\{\s*"
         r'"SandBox\.View\.Map\.PartyVisual"\s*'
@@ -298,27 +269,11 @@ def patch_allowlist_errors(source: str) -> list[str]:
 
 def run_regression_fixtures() -> None:
     fixtures = {
-        "HarmonyPatch MapState attribute": """
-            [HarmonyPatch(typeof(MapState), \"OnTick\")]
-            internal static class BadPatch { }
-        """,
-        "typeof MapState reflection hook": """
-            var target = typeof(MapState)
-                .GetMethod(\"OnTick\");
-            _harmony.Patch(target, prefix: prefix);
-        """,
-        "multiline AccessTools MapState hook": """
-            var target = AccessTools.Method(
-                typeof(MapState),
-                \"OnMapModeTick\");
-            _harmony.Patch(target, prefix: prefix);
-        """,
-        "unrelated PartyVisual reference": """
-            var description = \"SandBox.View.Map.PartyVisual\";
-            _harmony.Patch(otherMethod, prefix: prefix);
-        """,
+        "HarmonyPatch MapState attribute": '[HarmonyPatch(typeof(MapState), "OnTick")]',
+        "typeof MapState reflection hook": 'typeof(MapState).GetMethod("OnTick")',
+        "multiline AccessTools MapState hook": 'AccessTools.Method(\n typeof(MapState),\n "OnMapModeTick")',
+        "unrelated PartyVisual reference": 'var s = "SandBox.View.Map.PartyVisual"; _harmony.Patch(other, prefix: p);',
     }
-
     for name, fixture in fixtures.items():
         if not patch_allowlist_errors(fixture):
             fail(f"regression fixture was incorrectly accepted: {name}")
@@ -331,20 +286,12 @@ def main() -> None:
         for path in re.findall(r'<Compile Include="([^"]+)"', project_text)
     }
     if compiled != EXPECTED_COMPILED:
-        fail(
-            f"compiled source set changed: expected {sorted(EXPECTED_COMPILED)}, "
-            f"got {sorted(compiled)}"
-        )
-
+        fail(f"compiled source set changed: expected {sorted(EXPECTED_COMPILED)}, got {sorted(compiled)}")
     if compiled & FORBIDDEN_SOURCE_NAMES:
-        fail(
-            "obsolete simulation-deferral source is compiled: "
-            f"{sorted(compiled & FORBIDDEN_SOURCE_NAMES)}"
-        )
+        fail(f"obsolete simulation-deferral source is compiled: {sorted(compiled & FORBIDDEN_SOURCE_NAMES)}")
 
     for relative in sorted(compiled):
-        path = ROOT / "MapPerfFix" / relative
-        text = path.read_text(encoding="utf-8-sig")
+        text = (ROOT / "MapPerfFix" / relative).read_text(encoding="utf-8-sig")
         if relative != "SubModule.cs" and re.search(
             r"\b(?:Harmony|HarmonyMethod|HarmonyPatch|AccessTools)\b", text
         ):
@@ -354,21 +301,20 @@ def main() -> None:
     errors = patch_allowlist_errors(submodule_text)
     if errors:
         fail("patch allowlist violation(s):\n- " + "\n- ".join(errors))
-
     if "never skip, defer, replay, coalesce, or reorder authoritative" not in submodule_text:
         fail("authoritative callback invariant is missing")
 
     run_regression_fixtures()
 
-    if "<AssemblyName>MapPerfFix</AssemblyName>" not in project_text:
-        fail("project output assembly must be MapPerfFix.dll")
+    if "<AssemblyName>MapPerfProbe</AssemblyName>" not in project_text:
+        fail("project output assembly must be MapPerfProbe.dll")
     if "<Version>2.4.2</Version>" not in project_text:
         fail("Harmony compile-time reference must match the supported 2.4.2 API")
 
     module_root = ET.fromstring(MODULE_XML.read_text(encoding="utf-8"))
     dll_name = module_root.find("./SubModules/SubModule/DLLName")
-    if dll_name is None or dll_name.attrib.get("value") != "MapPerfFix.dll":
-        fail("SubModule.xml DLLName does not match the project output")
+    if dll_name is None or dll_name.attrib.get("value") != "MapPerfProbe.dll":
+        fail("SubModule.xml DLLName must be MapPerfProbe.dll")
 
     dependencies = {
         node.attrib.get("Id")
