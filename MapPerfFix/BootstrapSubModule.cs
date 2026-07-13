@@ -149,7 +149,7 @@ namespace MapPerfProbe
             }
         }
 
-        private static void TryShowStatusMessage(string text)
+        internal static void TryShowStatusMessage(string text)
         {
             try
             {
