@@ -10,11 +10,11 @@ namespace MapPerfProbe
     /// </summary>
     public sealed class BootstrapSubModule : MBSubModuleBase
     {
-        private const string Version = "2.1.1";
+        private static readonly string Version = ResolveVersion();
 
         protected override void OnSubModuleLoad()
         {
-            WriteBootstrapSentinel("entered OnSubModuleLoad");
+            TryWriteBootstrapSentinel("entered OnSubModuleLoad");
 
             try
             {
@@ -26,7 +26,7 @@ namespace MapPerfProbe
             }
             catch (Exception exception)
             {
-                WriteBootstrapSentinel(
+                TryWriteBootstrapSentinel(
                     "MapPerfLog bootstrap failed: " + exception.GetType().FullName +
                     ": " + exception.Message);
             }
@@ -37,9 +37,21 @@ namespace MapPerfProbe
             }
             catch (Exception exception)
             {
-                WriteBootstrapSentinel(
+                TryWriteBootstrapSentinel(
                     "MBSubModuleBase.OnSubModuleLoad failed: " +
                     exception.GetType().FullName + ": " + exception.Message);
+            }
+        }
+
+        private static void TryWriteBootstrapSentinel(string message)
+        {
+            try
+            {
+                WriteBootstrapSentinel(message);
+            }
+            catch
+            {
+                // Fail open: bootstrap diagnostics must never block module loading.
             }
         }
 
@@ -83,6 +95,21 @@ namespace MapPerfProbe
             catch
             {
                 return false;
+            }
+        }
+
+        private static string ResolveVersion()
+        {
+            try
+            {
+                var version = typeof(BootstrapSubModule).Assembly.GetName().Version;
+                return version == null
+                    ? "unknown"
+                    : version.Major + "." + version.Minor + "." + version.Build;
+            }
+            catch
+            {
+                return "unknown";
             }
         }
 
