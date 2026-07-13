@@ -11,15 +11,31 @@ namespace MapPerfProbe
     {
         private const long MaxBytes = 5L * 1024 * 1024;
         private const int MaxBackups = 3;
+        private const long PathRetryCooldownTicks = TimeSpan.TicksPerSecond * 5L;
+
         private static readonly object Sync = new object();
         private static readonly string[] CandidatePaths = BuildCandidatePaths();
         private static string _path;
+        private static long _activePathSize;
+        private static long _nextPathRetryUtcTicks;
         private static int _debugEnabled;
         private static int _initialized;
         private static MethodInfo _enginePrint;
+        private static ParameterInfo[] _enginePrintParameters;
         private static int _enginePrintResolved;
 
-        internal static string CurrentPath => _path ?? CandidatePaths[0];
+        internal static string CurrentPath
+        {
+            get
+            {
+                var selected = _path;
+                if (!string.IsNullOrEmpty(selected))
+                    return selected;
+                return CandidatePaths.Length > 0
+                    ? CandidatePaths[0]
+                    : "<filesystem logging unavailable>";
+            }
+        }
 
         internal static bool DebugEnabled
         {
@@ -39,6 +55,9 @@ namespace MapPerfProbe
                     if (TrySelectPath(CandidatePaths[i]))
                         break;
                 }
+
+                if (string.IsNullOrEmpty(_path))
+                    _nextPathRetryUtcTicks = DateTime.UtcNow.Ticks + PathRetryCooldownTicks;
             }
 
             Info("Logger initialized. File: " + CurrentPath);
@@ -69,21 +88,32 @@ namespace MapPerfProbe
             var written = false;
             lock (Sync)
             {
-                if (!string.IsNullOrEmpty(_path))
-                    written = TryAppend(_path, line);
-
-                if (!written)
+                var now = DateTime.UtcNow.Ticks;
+                if (now >= _nextPathRetryUtcTicks)
                 {
-                    for (var i = 0; i < CandidatePaths.Length; i++)
-                    {
-                        if (string.Equals(CandidatePaths[i], _path, StringComparison.OrdinalIgnoreCase))
-                            continue;
-                        if (!TrySelectPath(CandidatePaths[i]))
-                            continue;
+                    if (!string.IsNullOrEmpty(_path))
                         written = TryAppend(_path, line);
-                        if (written)
-                            break;
+
+                    if (!written)
+                    {
+                        for (var i = 0; i < CandidatePaths.Length; i++)
+                        {
+                            if (string.Equals(
+                                CandidatePaths[i],
+                                _path,
+                                StringComparison.OrdinalIgnoreCase))
+                                continue;
+                            if (!TrySelectPath(CandidatePaths[i]))
+                                continue;
+                            written = TryAppend(_path, line);
+                            if (written)
+                                break;
+                        }
                     }
+
+                    _nextPathRetryUtcTicks = written
+                        ? 0L
+                        : now + PathRetryCooldownTicks;
                 }
             }
 
@@ -103,11 +133,17 @@ namespace MapPerfProbe
                 if (!string.IsNullOrEmpty(directory))
                     Directory.CreateDirectory(directory);
 
-                using (var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+                using (var stream = new FileStream(
+                    path,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite))
                 {
                 }
 
+                var info = new FileInfo(path);
                 _path = path;
+                _activePathSize = info.Exists ? info.Length : 0L;
                 RotateIfNeeded(path);
                 return true;
             }
@@ -121,10 +157,19 @@ namespace MapPerfProbe
         {
             try
             {
-                RotateIfNeeded(path);
                 var bytes = Encoding.UTF8.GetBytes(line + Environment.NewLine);
-                using (var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+                RotateIfNeeded(path);
+                using (var stream = new FileStream(
+                    path,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite))
+                {
                     stream.Write(bytes, 0, bytes.Length);
+                }
+
+                if (string.Equals(path, _path, StringComparison.OrdinalIgnoreCase))
+                    _activePathSize += bytes.Length;
                 return true;
             }
             catch
@@ -135,11 +180,17 @@ namespace MapPerfProbe
 
         private static void RotateIfNeeded(string path)
         {
+            if (!string.Equals(path, _path, StringComparison.OrdinalIgnoreCase) ||
+                _activePathSize < MaxBytes)
+                return;
+
             try
             {
-                var info = new FileInfo(path);
-                if (!info.Exists || info.Length < MaxBytes)
+                if (!File.Exists(path))
+                {
+                    _activePathSize = 0L;
                     return;
+                }
 
                 for (var index = MaxBackups - 1; index >= 1; index--)
                 {
@@ -155,6 +206,7 @@ namespace MapPerfProbe
                 if (File.Exists(first))
                     File.Delete(first);
                 File.Move(path, first);
+                _activePathSize = 0L;
             }
             catch
             {
@@ -163,16 +215,30 @@ namespace MapPerfProbe
 
         private static string[] BuildCandidatePaths()
         {
-            var paths = new List<string>();
-            AddCandidate(paths, Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
-            AddCandidate(paths, Environment.GetFolderPath(Environment.SpecialFolder.Personal));
+            try
+            {
+                var paths = new List<string>();
+                AddCandidate(
+                    paths,
+                    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
+                AddCandidate(
+                    paths,
+                    Environment.GetFolderPath(Environment.SpecialFolder.Personal));
 
-            var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            if (!string.IsNullOrEmpty(local))
-                paths.Add(Path.Combine(local, "MapPerfProbe", "probe.log"));
+                var local = Environment.GetFolderPath(
+                    Environment.SpecialFolder.LocalApplicationData);
+                if (!string.IsNullOrEmpty(local))
+                    paths.Add(Path.Combine(local, "MapPerfProbe", "probe.log"));
 
-            paths.Add(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "MapPerfProbe.log"));
-            return paths.ToArray();
+                paths.Add(Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "MapPerfProbe.log"));
+                return paths.ToArray();
+            }
+            catch
+            {
+                return Array.Empty<string>();
+            }
         }
 
         private static void AddCandidate(ICollection<string> paths, string documents)
@@ -207,10 +273,10 @@ namespace MapPerfProbe
                 }
 
                 var method = _enginePrint;
-                if (method == null)
+                var parameters = _enginePrintParameters;
+                if (method == null || parameters == null)
                     return;
 
-                var parameters = method.GetParameters();
                 var arguments = new object[parameters.Length];
                 arguments[0] = line;
                 for (var i = 1; i < parameters.Length; i++)
@@ -233,25 +299,37 @@ namespace MapPerfProbe
 
         private static void ResolveEnginePrint()
         {
-            var debugType = Type.GetType("TaleWorlds.Library.Debug, TaleWorlds.Library", false);
+            var debugType = Type.GetType(
+                "TaleWorlds.Library.Debug, TaleWorlds.Library",
+                false);
             if (debugType == null)
+            {
+                _enginePrint = null;
+                _enginePrintParameters = null;
                 return;
+            }
 
             MethodInfo best = null;
+            ParameterInfo[] bestParameters = null;
             var methods = debugType.GetMethods(BindingFlags.Public | BindingFlags.Static);
             for (var i = 0; i < methods.Length; i++)
             {
                 var method = methods[i];
                 if (!string.Equals(method.Name, "Print", StringComparison.Ordinal))
                     continue;
+
                 var parameters = method.GetParameters();
                 if (parameters.Length == 0 || parameters[0].ParameterType != typeof(string))
                     continue;
-                if (best == null || parameters.Length < best.GetParameters().Length)
-                    best = method;
+                if (bestParameters != null && parameters.Length >= bestParameters.Length)
+                    continue;
+
+                best = method;
+                bestParameters = parameters;
             }
 
             _enginePrint = best;
+            _enginePrintParameters = bestParameters;
         }
     }
 }
