@@ -2,18 +2,26 @@
 <Module>
   <Name value="MapPerfProbe" />
   <Id value="MapPerfProbe" />
-  <Version value="v2.1.0" />
-  <SingleplayerModule value="true" />
-  <Official value="false" />
+  <Version value="v2.1.1" />
+  <Singleplayer value="true" />
+  <Multiplayer value="false" />
   <DependedModules>
     <DependedModule Id="Native" />
     <DependedModule Id="SandBoxCore" />
     <DependedModule Id="Sandbox" />
-    <DependedModule Id="StoryMode" />
     <DependedModule Id="Bannerlord.Harmony" />
     <DependedModule Id="MCMv5" DependentVersion="v5" />
   </DependedModules>
   <SubModules>
+    <SubModule>
+      <Name value="MapPerfProbe Bootstrap" />
+      <DLLName value="MapPerfProbe.dll" />
+      <SubModuleClassType value="MapPerfProbe.BootstrapSubModule" />
+      <Tags>
+        <Tag key="DedicatedServerType" value="none" />
+        <Tag key="IsNoRenderModeElement" value="false" />
+      </Tags>
+    </SubModule>
     <SubModule>
       <Name value="MapPerfProbe SubModule" />
       <DLLName value="MapPerfProbe.dll" />

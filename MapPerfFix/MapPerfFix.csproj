@@ -60,6 +60,7 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="BootstrapSubModule.cs" />
     <Compile Include="MapPerfConfig.cs" />
     <Compile Include="MapPerfLog.cs" />
     <Compile Include="MapPerfSettings.cs" />

@@ -11,8 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT / "MapPerfFix" / "MapPerfFix.csproj"
 MODULE_XML = ROOT / "MapPerfFix" / "SubModule.xml"
 SUBMODULE = ROOT / "MapPerfFix" / "SubModule.cs"
+BOOTSTRAP = ROOT / "MapPerfFix" / "BootstrapSubModule.cs"
+ASSEMBLY_INFO = ROOT / "MapPerfFix" / "Properties" / "AssemblyInfo.cs"
+VERSION_FILE = ROOT / "version.txt"
+MAX_MODULE_XML_BYTES = 64 * 1024
 
 EXPECTED_COMPILED = {
+    "BootstrapSubModule.cs",
     "MapPerfConfig.cs",
     "MapPerfLog.cs",
     "MapPerfSettings.cs",
@@ -157,6 +162,31 @@ def method_hash(source: str, name: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def parse_bounded_module_xml(path: Path) -> ET.Element:
+    with path.open("rb") as module_file:
+        data = module_file.read(MAX_MODULE_XML_BYTES + 1)
+    if len(data) > MAX_MODULE_XML_BYTES:
+        fail(
+            "SubModule.xml exceeds the " + str(MAX_MODULE_XML_BYTES) +
+            " byte verification limit"
+        )
+
+    upper = data.upper()
+    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+        fail("SubModule.xml must not contain DTD or entity declarations")
+
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exception:
+        fail("SubModule.xml is not valid UTF-8: " + str(exception))
+
+    try:
+        parser = ET.XMLParser(target=ET.TreeBuilder())
+        return ET.fromstring(text, parser=parser)
+    except ET.ParseError as exception:
+        fail("SubModule.xml is not valid XML: " + str(exception))
+
+
 def verify() -> None:
     project = PROJECT.read_text(encoding="utf-8")
     compiled = {
@@ -217,14 +247,90 @@ def verify() -> None:
         if actual != expected:
             fail("reviewed method changed: " + name + " expected=" + expected + " actual=" + actual)
 
-    module = ET.fromstring(MODULE_XML.read_text(encoding="utf-8"))
-    if module.find("SingleplayerModule") is None:
-        fail("SubModule.xml must use SingleplayerModule")
-    if module.find("Official") is None:
-        fail("SubModule.xml must declare Official")
-    dll = module.find("./SubModules/SubModule/DLLName")
-    if dll is None or dll.attrib.get("value") != "MapPerfProbe.dll":
-        fail("loader filename must be MapPerfProbe.dll")
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8-sig")
+    bootstrap_code = strip_comments(bootstrap, mask_literals=True)
+    bootstrap_source = strip_comments(bootstrap, mask_literals=False)
+    if '"MapPerfProbe"' not in bootstrap_source or '"bootstrap.log"' not in bootstrap_source:
+        fail("bootstrap must write %TEMP%\\MapPerfProbe\\bootstrap.log")
+    if re.search(r"\b(?:MapPerfConfig|MapPerfSettings|Harmony|HarmonyLib)\b", bootstrap_code):
+        fail("bootstrap must remain independent of MCM settings and Harmony")
+
+    bootstrap_entry = strip_comments(
+        extract_method(bootstrap, "OnSubModuleLoad"),
+        mask_literals=False,
+    )
+    if re.search(
+        r'\bTryWriteBootstrapSentinel\s*\(\s*"entered OnSubModuleLoad"\s*\)',
+        bootstrap_entry,
+    ) is None:
+        fail("bootstrap entry sentinel must use the fail-open wrapper")
+    if "Assembly.GetName().Version" not in bootstrap_source:
+        fail("bootstrap must derive its displayed version from the compiled assembly")
+    if re.search(r'\bVersion\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"', bootstrap_source):
+        fail("bootstrap must not duplicate the authoritative semantic version")
+
+    version = VERSION_FILE.read_text(encoding="utf-8").strip()
+    version_pattern = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    if re.fullmatch(version_pattern, version) is None:
+        fail("version.txt must contain canonical MAJOR.MINOR.PATCH")
+
+    assembly_info = ASSEMBLY_INFO.read_text(encoding="utf-8")
+    assembly_code = strip_comments(assembly_info, mask_literals=False)
+    assembly_version = version + ".0"
+    for attribute in ("AssemblyVersion", "AssemblyFileVersion"):
+        values = re.findall(
+            r'\[\s*assembly\s*:\s*' + attribute +
+            r'\s*\(\s*"([^"]+)"\s*\)\s*\]',
+            assembly_code,
+        )
+        if values != [assembly_version]:
+            fail(attribute + " is not synchronized with version.txt")
+
+    module = parse_bounded_module_xml(MODULE_XML)
+    module_version = module.find("Version")
+    if module_version is None or module_version.attrib.get("value") != "v" + version:
+        fail("SubModule.xml version is not synchronized with version.txt")
+
+    singleplayer = module.find("Singleplayer")
+    multiplayer = module.find("Multiplayer")
+    if singleplayer is None or singleplayer.attrib.get("value") != "true":
+        fail("SubModule.xml must declare Singleplayer=true")
+    if multiplayer is None or multiplayer.attrib.get("value") != "false":
+        fail("SubModule.xml must declare Multiplayer=false")
+    if module.find("SingleplayerModule") is not None or module.find("Official") is not None:
+        fail("legacy SingleplayerModule/Official loader tags are not allowed")
+
+    dependencies = {
+        node.attrib.get("Id")
+        for node in module.findall("./DependedModules/DependedModule")
+    }
+    if "StoryMode" in dependencies:
+        fail("StoryMode must not be a hard dependency for TOR sandbox campaigns")
+    for required in ("Native", "SandBoxCore", "Sandbox", "Bannerlord.Harmony", "MCMv5"):
+        if required not in dependencies:
+            fail("required module dependency is missing: " + required)
+
+    submodules = module.findall("./SubModules/SubModule")
+    if len(submodules) != 2:
+        fail("SubModule.xml must contain exactly two submodules")
+    class_types = []
+    for node in submodules:
+        class_type = node.find("SubModuleClassType")
+        class_types.append(None if class_type is None else class_type.attrib.get("value"))
+    expected_class_types = [
+        "MapPerfProbe.BootstrapSubModule",
+        "MapPerfProbe.SubModule",
+    ]
+    if class_types != expected_class_types:
+        fail(
+            "SubModule.xml must load BootstrapSubModule first and SubModule second; got " +
+            repr(class_types)
+        )
+    for node in submodules:
+        dll = node.find("DLLName")
+        if dll is None or dll.attrib.get("value") != "MapPerfProbe.dll":
+            fail("every submodule must load MapPerfProbe.dll")
+
     if "<AssemblyName>MapPerfProbe</AssemblyName>" not in project:
         fail("project output must be MapPerfProbe.dll")
 

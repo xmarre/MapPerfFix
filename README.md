@@ -29,7 +29,15 @@ The module can select a lower-latency .NET GC mode while the campaign map is act
 
 ## Logging
 
-At startup, MapPerfProbe creates `probe.log` and displays its selected path in game. It also mirrors log lines to Bannerlord's engine debug output when that API is available.
+Version 2.1.1 loads a minimal bootstrap submodule before the MCM-dependent main submodule. It writes an early sentinel before MCM settings or Harmony are touched:
+
+```text
+%TEMP%\MapPerfProbe\bootstrap.log
+```
+
+The sentinel includes the exact `MapPerfProbe.dll` path loaded by Bannerlord. If this file is absent after launching with the module enabled, Bannerlord did not load the DLL or did not instantiate the bootstrap submodule.
+
+After bootstrap, MapPerfProbe creates `probe.log` and displays its selected path in game. It also mirrors log lines to Bannerlord's engine debug output when that API is available.
 
 Primary path:
 
@@ -46,7 +54,7 @@ Fallbacks:
 
 The log includes:
 
-- module and logger startup confirmation;
+- bootstrap, module, and logger startup confirmation;
 - whether the legacy visual optimization installed;
 - fully-hidden visual skip counts and skip rate;
 - individual slow TOR callbacks;
@@ -59,8 +67,11 @@ The established loader contract remains:
 ```text
 Module ID: MapPerfProbe
 DLL:       MapPerfProbe.dll
-Class:     MapPerfProbe.SubModule
+Bootstrap: MapPerfProbe.BootstrapSubModule
+Main:      MapPerfProbe.SubModule
 ```
+
+The descriptor uses the original `Singleplayer=true` / `Multiplayer=false` schema and does not require `StoryMode`, allowing TOR sandbox loadouts to instantiate the module.
 
 ## Requirements
 
@@ -84,4 +95,4 @@ The output is `MapPerfProbe.dll`, matching `SubModule.xml`.
 python3 tools/verify_safety.py
 ```
 
-The verifier rejects the removed simulation-deferral sources, direct campaign tick hooks, deferred work queues, and unreviewed Harmony patch surfaces. The only method permitted to skip an original call is the fully-hidden legacy party-visual prefix.
+The verifier rejects the removed simulation-deferral sources, direct campaign tick hooks, deferred work queues, unreviewed Harmony patch surfaces, the wrong loader schema, and a hard `StoryMode` dependency. The only method permitted to skip an original call is the fully-hidden legacy party-visual prefix.
