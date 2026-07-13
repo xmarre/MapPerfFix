@@ -62,21 +62,23 @@ namespace MapPerfProbe
                        " | assembly=" + SafeAssemblyLocation() +
                        Environment.NewLine;
 
-            if (TryAppend(Path.Combine(
-                    SafeTempPath(),
-                    "MapPerfProbe",
-                    "bootstrap.log"),
-                line))
+            var temp = SafeTempPath();
+            if (!string.IsNullOrEmpty(temp) &&
+                TryAppend(Path.Combine(temp, "MapPerfProbe", "bootstrap.log"), line))
                 return;
 
             var local = SafeFolder(Environment.SpecialFolder.LocalApplicationData);
-            if (TryAppend(Path.Combine(local, "MapPerfProbe", "bootstrap.log"), line))
+            if (!string.IsNullOrEmpty(local) &&
+                TryAppend(Path.Combine(local, "MapPerfProbe", "bootstrap.log"), line))
                 return;
 
-            TryAppend(Path.Combine(
-                SafeBaseDirectory(),
-                "MapPerfProbe-bootstrap.log"),
-                line);
+            var baseDirectory = SafeBaseDirectory();
+            if (!string.IsNullOrEmpty(baseDirectory))
+            {
+                TryAppend(
+                    Path.Combine(baseDirectory, "MapPerfProbe-bootstrap.log"),
+                    line);
+            }
         }
 
         private static bool TryAppend(string path, string line)
