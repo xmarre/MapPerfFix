@@ -24,34 +24,36 @@ jobs:
 
       - name: Apply deterministic 1.3.15 compatibility source update
         id: source-update
-        shell: pwsh
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          $path = 'MapPerfFix\SubModule.cs'
-          $source = Get-Content -Raw -Encoding UTF8 $path
-          $old = 'MapPerfLog.Info("MapPerfProbe 2.1.0 loaded. Authoritative campaign callbacks remain synchronous.");'
-          $new = 'MapPerfLog.Info("MapPerfProbe " + BootstrapSubModule.VersionText + " loaded for Bannerlord 1.3.15 / TOR WiTM 1.16. Authoritative campaign callbacks remain synchronous.");'
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
 
-          if ($source.Contains($old)) {
-              $source = $source.Replace($old, $new)
-              Set-Content -Encoding UTF8 -NoNewline $path $source
-          }
-          elseif (-not $source.Contains($new)) {
-              throw 'Expected MapPerfProbe startup identity line was not found'
-          }
+          path = Path("MapPerfFix/SubModule.cs")
+          source = path.read_text(encoding="utf-8-sig")
+          old = 'MapPerfLog.Info("MapPerfProbe 2.1.0 loaded. Authoritative campaign callbacks remain synchronous.");'
+          new = 'MapPerfLog.Info("MapPerfProbe " + BootstrapSubModule.VersionText + " loaded for Bannerlord 1.3.15 / TOR WiTM 1.16. Authoritative campaign callbacks remain synchronous.");'
+
+          if old in source:
+              source = source.replace(old, new, 1)
+              path.write_bytes(source.encode("utf-8"))
+          elif new not in source:
+              raise SystemExit("Expected MapPerfProbe startup identity line was not found")
+          PY
 
           git diff --check
-          if (-not (git diff --quiet)) {
-              git config user.name "github-actions[bot]"
-              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              git add -- $path
-              git commit -m "fix: target Bannerlord 1.3.15 and TOR 1.16"
-              if ('${{ github.event_name }}' -eq 'pull_request') {
-                  git push origin "HEAD:${{ github.head_ref }}"
-              }
-          }
+          if ! git diff --quiet -- MapPerfFix/SubModule.cs; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- MapPerfFix/SubModule.cs
+            git commit -m "fix: target Bannerlord 1.3.15 and TOR 1.16"
+            if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+              git push origin "HEAD:refs/heads/${GITHUB_HEAD_REF}"
+            fi
+          fi
 
-          "target_sha=$(git rev-parse HEAD)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          echo "target_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
       - uses: microsoft/setup-msbuild@v2
 
