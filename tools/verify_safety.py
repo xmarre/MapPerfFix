@@ -250,8 +250,19 @@ def verify() -> None:
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8-sig")
     bootstrap_code = strip_comments(bootstrap, mask_literals=True)
     bootstrap_source = strip_comments(bootstrap, mask_literals=False)
-    if '"MapPerfProbe"' not in bootstrap_source or '"bootstrap.log"' not in bootstrap_source:
-        fail("bootstrap must write %TEMP%\\MapPerfProbe\\bootstrap.log")
+    required_bootstrap_literals = (
+        '"MapPerfProbe"',
+        '"bootstrap.log"',
+        '"MapPerfProbe.loaded.txt"',
+        '"TaleWorlds.Library.InformationMessage, TaleWorlds.Library"',
+        '"TaleWorlds.Library.InformationManager, TaleWorlds.Library"',
+    )
+    for value in required_bootstrap_literals:
+        if value not in bootstrap_source:
+            fail("bootstrap invariant is missing: " + value)
+    if "TaleWorlds.Core.InformationMessage" in bootstrap_source or \
+       "TaleWorlds.Core.InformationManager" in bootstrap_source:
+        fail("bootstrap status API must resolve from TaleWorlds.Library")
     if re.search(r"\b(?:MapPerfConfig|MapPerfSettings|Harmony|HarmonyLib)\b", bootstrap_code):
         fail("bootstrap must remain independent of MCM settings and Harmony")
 
@@ -264,6 +275,13 @@ def verify() -> None:
         bootstrap_entry,
     ) is None:
         fail("bootstrap entry sentinel must use the fail-open wrapper")
+
+    bootstrap_screen = strip_comments(
+        extract_method(bootstrap, "OnBeforeInitialModuleScreenSetAsRoot"),
+        mask_literals=False,
+    )
+    if "TryShowStatusMessage" not in bootstrap_screen:
+        fail("bootstrap must show an unmistakable status on the initial module screen")
     if "Assembly.GetName().Version" not in bootstrap_source:
         fail("bootstrap must derive its displayed version from the compiled assembly")
     if re.search(r'\bVersion\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"', bootstrap_source):
@@ -291,14 +309,40 @@ def verify() -> None:
     if module_version is None or module_version.attrib.get("value") != "v" + version:
         fail("SubModule.xml version is not synchronized with version.txt")
 
-    singleplayer = module.find("Singleplayer")
-    multiplayer = module.find("Multiplayer")
-    if singleplayer is None or singleplayer.attrib.get("value") != "true":
-        fail("SubModule.xml must declare Singleplayer=true")
-    if multiplayer is None or multiplayer.attrib.get("value") != "false":
-        fail("SubModule.xml must declare Multiplayer=false")
-    if module.find("SingleplayerModule") is not None or module.find("Official") is not None:
-        fail("legacy SingleplayerModule/Official loader tags are not allowed")
+    leading_tags = [child.tag for child in list(module)[:6]]
+    expected_leading_tags = [
+        "Id",
+        "Name",
+        "Version",
+        "DefaultModule",
+        "ModuleCategory",
+        "ModuleType",
+    ]
+    if leading_tags != expected_leading_tags:
+        fail(
+            "SubModule.xml must use the current Bannerlord element order; got " +
+            repr(leading_tags)
+        )
+
+    default_module = module.find("DefaultModule")
+    module_category = module.find("ModuleCategory")
+    module_type = module.find("ModuleType")
+    if default_module is None or default_module.attrib.get("value") != "false":
+        fail("SubModule.xml must declare DefaultModule=false")
+    if module_category is None or module_category.attrib.get("value") != "Singleplayer":
+        fail("SubModule.xml must declare ModuleCategory=Singleplayer")
+    if module_type is None or module_type.attrib.get("value") != "Community":
+        fail("SubModule.xml must declare ModuleType=Community")
+
+    for obsolete in (
+        "Singleplayer",
+        "Multiplayer",
+        "SingleplayerModule",
+        "MultiplayerModule",
+        "Official",
+    ):
+        if module.find(obsolete) is not None:
+            fail("obsolete loader element is not allowed: " + obsolete)
 
     dependencies = {
         node.attrib.get("Id")
@@ -330,6 +374,11 @@ def verify() -> None:
         dll = node.find("DLLName")
         if dll is None or dll.attrib.get("value") != "MapPerfProbe.dll":
             fail("every submodule must load MapPerfProbe.dll")
+        if node.find("Assemblies") is None:
+            fail("every submodule must contain the current-schema Assemblies element")
+        child_tags = [child.tag for child in list(node)]
+        if child_tags != ["Name", "DLLName", "SubModuleClassType", "Assemblies", "Tags"]:
+            fail("submodule elements are not in current Bannerlord schema order: " + repr(child_tags))
 
     if "<AssemblyName>MapPerfProbe</AssemblyName>" not in project:
         fail("project output must be MapPerfProbe.dll")
