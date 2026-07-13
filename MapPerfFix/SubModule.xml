@@ -3,7 +3,7 @@
         xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/BUTR/Bannerlord.XmlSchemas/master/SubModule.xsd">
   <Id value="MapPerfProbe" />
   <Name value="MapPerfProbe" />
-  <Version value="v2.2.0" />
+  <Version value="v2.2.1" />
   <DefaultModule value="false" />
   <ModuleCategory value="Singleplayer" />
   <ModuleType value="Community" />
@@ -12,7 +12,7 @@
     <DependedModule Id="SandBoxCore" />
     <DependedModule Id="Sandbox" />
     <DependedModule Id="Bannerlord.Harmony" />
-    <DependedModule Id="MCMv5" DependentVersion="v5" />
+    <DependedModule Id="Bannerlord.MBOptionScreen" />
   </DependedModules>
   <SubModules>
     <SubModule>
