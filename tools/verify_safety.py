@@ -194,7 +194,10 @@ def verify() -> None:
     if re.search(r"\[\s*HarmonyPatch\b", masked):
         fail("HarmonyPatch attributes are not allowed")
 
-    prefix = extract_method(source, "HiddenPartyVisualPrefix")
+    prefix = strip_comments(
+        extract_method(source, "HiddenPartyVisualPrefix"),
+        mask_literals=True,
+    )
     if len(re.findall(r"\breturn\s+false\s*;", prefix)) != 1:
         fail("HiddenPartyVisualPrefix must contain exactly one skip return")
 
