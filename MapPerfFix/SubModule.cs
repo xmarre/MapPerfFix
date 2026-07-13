@@ -61,7 +61,7 @@ namespace MapPerfProbe
             try
             {
                 _harmony = new Harmony(HarmonyId);
-                MapPerfLog.Info("MapPerfProbe 2.1.0 loaded. Authoritative campaign callbacks remain synchronous.");
+                MapPerfLog.Info("MapPerfProbe " + BootstrapSubModule.VersionText + " loaded for Bannerlord 1.3.15 / TOR WiTM 1.16. Authoritative campaign callbacks remain synchronous.");
             }
             catch (Exception exception)
             {
