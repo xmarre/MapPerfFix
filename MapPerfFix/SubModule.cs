@@ -40,6 +40,7 @@ namespace MapPerfProbe
         private static int _nextPatchProbeFrame = PatchRetryFrames;
         private static int _nextPatchCompatibilityFrame;
         private static bool _visualPatchInstalled;
+        private static int _visualOptimizationEnabled;
         private static MethodInfo _visualTickMethod;
         private static bool _foreignPatchLogged;
         private static int _inputSampleFrame = -1;
@@ -73,6 +74,8 @@ namespace MapPerfProbe
 
         protected override void OnSubModuleUnloaded()
         {
+            Volatile.Write(ref _visualOptimizationEnabled, 0);
+
             try
             {
                 if (_harmony != null)
@@ -273,8 +276,8 @@ namespace MapPerfProbe
                     if (type == null)
                         continue;
 
-                    var method = AccessTools.Method(type, "Tick", new[] { typeof(float) });
-                    if (!IsPatchableVisualTick(method))
+                    var method = FindSupportedVisualTick(type);
+                    if (method == null)
                         continue;
 
                     if (HasForeignPatches(method))
@@ -291,25 +294,100 @@ namespace MapPerfProbe
 
                     try
                     {
-                        var prefix = new HarmonyMethod(
-                            typeof(SubModule).GetMethod(
-                                nameof(PartyVisualTickPrefix),
-                                BindingFlags.Static | BindingFlags.Public));
+                        var prefixMethod = typeof(SubModule).GetMethod(
+                            nameof(PartyVisualTickPrefix),
+                            BindingFlags.Static | BindingFlags.Public);
+                        if (prefixMethod == null)
+                        {
+                            MapPerfLog.Warn("PartyVisual prefix method could not be resolved.");
+                            Volatile.Write(ref _nextPatchProbeFrame, int.MaxValue);
+                            return;
+                        }
+
+                        var prefix = new HarmonyMethod(prefixMethod);
                         _harmony.Patch(method, prefix: prefix);
                         _visualTickMethod = method;
                         _visualPatchInstalled = true;
                         _nextPatchCompatibilityFrame =
                             Volatile.Read(ref _frameSequence) + PatchCompatibilityCheckFrames;
-                        MapPerfLog.Info("Installed safe paused off-screen PartyVisual optimization.");
+                        Volatile.Write(ref _visualOptimizationEnabled, 1);
+                        MapPerfLog.Info(
+                            "Installed safe paused off-screen PartyVisual optimization for " +
+                            DescribeVisualTick(method) + ".");
                         return;
                     }
                     catch (Exception ex)
                     {
+                        Volatile.Write(ref _visualOptimizationEnabled, 0);
                         MapPerfLog.Error("PartyVisual.Tick patch failed", ex);
                         return;
                     }
                 }
             }
+        }
+
+        private static MethodInfo FindSupportedVisualTick(Type type)
+        {
+            MethodInfo legacySingleFloat = null;
+            var methods = AccessTools.GetDeclaredMethods(type);
+            for (var i = 0; i < methods.Count; i++)
+            {
+                var method = methods[i];
+                if (!IsPatchableVisualTick(method))
+                    continue;
+
+                if (IsCurrentVisualTickSignature(method))
+                    return method;
+
+                if (legacySingleFloat == null && IsLegacyVisualTickSignature(method))
+                    legacySingleFloat = method;
+            }
+
+            return legacySingleFloat;
+        }
+
+        private static bool IsPatchableVisualTick(MethodInfo method)
+        {
+            if (method == null || method.IsStatic || method.IsAbstract ||
+                method.ContainsGenericParameters || method.IsSpecialName)
+                return false;
+            if (!string.Equals(method.Name, "Tick", StringComparison.Ordinal))
+                return false;
+            if (method.ReturnType != typeof(void))
+                return false;
+            return method.GetMethodBody() != null;
+        }
+
+        private static bool IsCurrentVisualTickSignature(MethodInfo method)
+        {
+            var parameters = method.GetParameters();
+            if (parameters.Length != 3 || parameters[0].ParameterType != typeof(float))
+                return false;
+            if (parameters[1].ParameterType != typeof(int).MakeByRefType())
+                return false;
+
+            var dirtyArrayByRef = parameters[2].ParameterType;
+            if (!dirtyArrayByRef.IsByRef)
+                return false;
+
+            var dirtyArrayType = dirtyArrayByRef.GetElementType();
+            if (dirtyArrayType == null || !dirtyArrayType.IsArray)
+                return false;
+
+            return dirtyArrayType.GetElementType() == method.DeclaringType;
+        }
+
+        private static bool IsLegacyVisualTickSignature(MethodInfo method)
+        {
+            var parameters = method.GetParameters();
+            return parameters.Length == 1 && parameters[0].ParameterType == typeof(float);
+        }
+
+        private static string DescribeVisualTick(MethodInfo method)
+        {
+            return IsCurrentVisualTickSignature(method)
+                ? "Tick(float, ref int, ref PartyVisual[])"
+                : "Tick(float)";
         }
 
         private static void DisableVisualPatchIfCompatibilityChanged()
@@ -326,13 +404,19 @@ namespace MapPerfProbe
                 if (!_visualPatchInstalled || _visualTickMethod == null || _harmony == null)
                     return;
 
+                // The prefix must fail open before unpatching. Harmony can throw while
+                // rebuilding the wrapper, leaving the prefix physically installed.
+                Volatile.Write(ref _visualOptimizationEnabled, 0);
+
                 try
                 {
                     _harmony.Unpatch(_visualTickMethod, HarmonyPatchType.Prefix, HarmonyId);
                 }
                 catch (Exception ex)
                 {
-                    MapPerfLog.Error("Could not remove the PartyVisual optimization after a compatibility change", ex);
+                    MapPerfLog.Error(
+                        "Could not remove the PartyVisual optimization after a compatibility change",
+                        ex);
                 }
                 finally
                 {
@@ -345,18 +429,6 @@ namespace MapPerfProbe
                 MapPerfLog.Warn(
                     "A different mod patched PartyVisual.Tick after startup; the paused visual optimization was disabled.");
             }
-        }
-
-        private static bool IsPatchableVisualTick(MethodInfo method)
-        {
-            if (method == null || method.IsAbstract || method.ContainsGenericParameters)
-                return false;
-            if (method.ReturnType != typeof(void))
-                return false;
-
-            var parameters = method.GetParameters();
-            return parameters.Length == 1 && parameters[0].ParameterType == typeof(float) &&
-                   method.GetMethodBody() != null;
         }
 
         private static bool HasForeignPatches(MethodBase method)
@@ -397,6 +469,8 @@ namespace MapPerfProbe
         [HarmonyPriority(Priority.Last)]
         public static bool PartyVisualTickPrefix(object __instance)
         {
+            if (Volatile.Read(ref _visualOptimizationEnabled) == 0)
+                return true;
             if (__instance == null)
                 return true;
             if (!MapPerfConfig.Enabled || !MapPerfConfig.OptimizePausedOffscreenVisuals)
