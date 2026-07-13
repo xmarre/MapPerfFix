@@ -200,6 +200,7 @@ def verify() -> None:
 
     source = SUBMODULE.read_text(encoding="utf-8-sig")
     masked = strip_comments(source, mask_literals=True)
+    submodule_source = strip_comments(source, mask_literals=False)
 
     forbidden = {
         "MapState tick patch": r"MapState\s*\.\s*(?:OnTick|OnMapModeTick)",
@@ -260,9 +261,19 @@ def verify() -> None:
     for value in required_bootstrap_literals:
         if value not in bootstrap_source:
             fail("bootstrap invariant is missing: " + value)
-    if "TaleWorlds.Core.InformationMessage" in bootstrap_source or \
-       "TaleWorlds.Core.InformationManager" in bootstrap_source:
-        fail("bootstrap status API must resolve from TaleWorlds.Library")
+
+    for status_source in (bootstrap_source, submodule_source):
+        if "TaleWorlds.Core.InformationMessage" in status_source or \
+           "TaleWorlds.Core.InformationManager" in status_source:
+            fail("status API must resolve from TaleWorlds.Library")
+
+    status_method = strip_comments(
+        extract_method(source, "TryShowStatusMessage"),
+        mask_literals=False,
+    )
+    if "BootstrapSubModule.TryShowStatusMessage" not in status_method:
+        fail("main submodule must reuse the bootstrap TaleWorlds.Library status helper")
+
     if re.search(r"\b(?:MapPerfConfig|MapPerfSettings|Harmony|HarmonyLib)\b", bootstrap_code):
         fail("bootstrap must remain independent of MCM settings and Harmony")
 
