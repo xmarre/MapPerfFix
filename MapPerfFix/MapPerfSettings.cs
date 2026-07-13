@@ -21,7 +21,7 @@ namespace MapPerfProbe
 
         [SettingPropertyGroup("Safe optimizations", GroupOrder = 1)]
         [SettingPropertyBool("Skip fully hidden mobile-party visual ticks",
-            HintText = "Bannerlord 1.2.x only. Skips rendering and animation work after a mobile party is fully faded and hidden. Campaign simulation, positions, events, AI, and periodic callbacks are untouched.",
+            HintText = "Legacy PartyVisual implementations only. Newer MobilePartyVisual builds are detected and left unpatched. Skips rendering and animation work only after a mobile party is fully faded and hidden. Campaign simulation, positions, events, AI, and periodic callbacks are untouched.",
             RequireRestart = false, Order = 0)]
         public bool OptimizeHiddenPartyVisuals { get; set; } = true;
 
@@ -33,7 +33,7 @@ namespace MapPerfProbe
 
         [SettingPropertyGroup("Diagnostics", GroupOrder = 2)]
         [SettingPropertyBool("Profile TOR campaign callbacks",
-            HintText = "Measures TOR campaign callback time without skipping or delaying calls and writes aggregate reports to probe.log.",
+            HintText = "Measures TOR 1.16 campaign callback time without skipping or delaying calls and writes aggregate reports to probe.log.",
             RequireRestart = false, Order = 0)]
         public bool ProfileTorCampaignCallbacks { get; set; } = true;
 
