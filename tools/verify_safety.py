@@ -163,7 +163,8 @@ def method_hash(source: str, name: str) -> str:
 
 
 def parse_bounded_module_xml(path: Path) -> ET.Element:
-    data = path.read_bytes()
+    with path.open("rb") as module_file:
+        data = module_file.read(MAX_MODULE_XML_BYTES + 1)
     if len(data) > MAX_MODULE_XML_BYTES:
         fail(
             "SubModule.xml exceeds the " + str(MAX_MODULE_XML_BYTES) +
@@ -248,7 +249,8 @@ def verify() -> None:
 
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8-sig")
     bootstrap_code = strip_comments(bootstrap, mask_literals=True)
-    if '"MapPerfProbe"' not in bootstrap or '"bootstrap.log"' not in bootstrap:
+    bootstrap_source = strip_comments(bootstrap, mask_literals=False)
+    if '"MapPerfProbe"' not in bootstrap_source or '"bootstrap.log"' not in bootstrap_source:
         fail("bootstrap must write %TEMP%\\MapPerfProbe\\bootstrap.log")
     if re.search(r"\b(?:MapPerfConfig|MapPerfSettings|Harmony|HarmonyLib)\b", bootstrap_code):
         fail("bootstrap must remain independent of MCM settings and Harmony")
@@ -262,9 +264,9 @@ def verify() -> None:
         bootstrap_entry,
     ) is None:
         fail("bootstrap entry sentinel must use the fail-open wrapper")
-    if "Assembly.GetName().Version" not in bootstrap:
+    if "Assembly.GetName().Version" not in bootstrap_source:
         fail("bootstrap must derive its displayed version from the compiled assembly")
-    if re.search(r'\bVersion\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"', bootstrap):
+    if re.search(r'\bVersion\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"', bootstrap_source):
         fail("bootstrap must not duplicate the authoritative semantic version")
 
     version = VERSION_FILE.read_text(encoding="utf-8").strip()
