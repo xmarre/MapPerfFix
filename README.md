@@ -1,25 +1,72 @@
-# Map Performance Fix
+# MapPerfProbe
 
-A Bannerlord campaign-map performance module with one hard invariant: it never skips, defers, replays, coalesces, or reorders authoritative campaign callbacks.
+A Bannerlord campaign-map performance module with one hard invariant: campaign, AI, event, periodic, save, and UI callbacks remain synchronous and execute on their original call path.
 
-## What was wrong
+## What version 2.1 does
 
-The previous implementation patched `MapState.OnTick`, `MapState.OnMapModeTick`, `Campaign.RealTick`, periodic event hubs, and behavior ticks with prefixes that returned `false` or replayed the methods later through a queue. Those methods are the campaign simulation path. Deferring them changed event order, produced catch-up bursts, and could omit behavior callbacks entirely.
+### Hidden mobile-party visual optimization
 
-The established module identity and loader contract remain `MapPerfProbe` / `MapPerfProbe.dll`.
+Bannerlord 1.2.x performs `AgentVisuals` animation work for mobile parties before checking whether the party has fully faded out. MapPerfProbe skips `PartyVisual.Tick` only when all of the following are already true:
 
-## Safe optimizations
+- the visual belongs to a mobile party;
+- the party is not visible to the player;
+- its visual alpha is already zero;
+- no level-mask refresh is pending.
 
-- Switches the .NET GC latency mode only while the campaign map is active.
-- Reduces confirmed off-screen `PartyVisual.Tick` rendering work only while campaign time is stopped. The resolver supports the current `Tick(float, ref int, ref PartyVisual[])` signature and the legacy single-argument `Tick(float)` signature. Unknown signatures fail open and are not patched.
-- Runs every campaign, map-state, periodic, save, UI, and behavior callback at its original time and on its original call path.
-- Refuses the visual optimization when another mod patches the same method or when required visibility members cannot be verified.
+The campaign party continues to move, run AI, participate in events, and receive all periodic callbacks. Its visual tick resumes on the first frame where visibility returns. Settlements and fading or visible parties are never skipped.
+
+Bannerlord's newer `SandBox.View.Map.Visuals.MobilePartyVisual` implementation already gates hidden `AgentVisuals`, so MapPerfProbe detects that implementation and does not install a redundant skip.
+
+### TOR callback profiler
+
+MapPerfProbe instruments TOR campaign tick methods with timing-only Harmony prefixes and postfixes. It records calls, total time, average time, maximum time, and slow-call counts. These patches never return `false`, alter arguments, reschedule work, or replace methods.
+
+The profiler is enabled by default so the remaining campaign simulation hotspot can be identified from real gameplay rather than hidden behind broad tick skipping.
+
+### GC latency
+
+The module can select a lower-latency .NET GC mode while the campaign map is active. This changes managed-runtime collection policy only.
+
+## Logging
+
+At startup, MapPerfProbe creates `probe.log` and displays its selected path in game. It also mirrors log lines to Bannerlord's engine debug output when that API is available.
+
+Primary path:
+
+```text
+Documents\Mount and Blade II Bannerlord\Logs\MapPerfProbe\probe.log
+```
+
+Fallbacks:
+
+```text
+%LOCALAPPDATA%\MapPerfProbe\probe.log
+<Bannerlord executable directory>\MapPerfProbe.log
+```
+
+The log includes:
+
+- module and logger startup confirmation;
+- whether the legacy visual optimization installed;
+- fully-hidden visual skip counts and skip rate;
+- individual slow TOR callbacks;
+- aggregate TOR callback reports every 30 seconds by default.
+
+## Module identity
+
+The established loader contract remains:
+
+```text
+Module ID: MapPerfProbe
+DLL:       MapPerfProbe.dll
+Class:     MapPerfProbe.SubModule
+```
 
 ## Requirements
 
-- Bannerlord.Harmony 2.4.2 or newer
+- Bannerlord.Harmony
 - MCM v5
-- A single-player campaign module (`Sandbox`)
+- Bannerlord single-player campaign modules
 
 ## Build
 
@@ -31,14 +78,10 @@ msbuild MapPerfFix.sln /p:Configuration=Release /p:Platform=x64 /p:BannerlordDir
 
 The output is `MapPerfProbe.dll`, matching `SubModule.xml`.
 
-## Static safety check
+## Safety verification
 
 ```bash
 python3 tools/verify_safety.py
 ```
 
-## Safety boundary
-
-A generic frame-time patch cannot make expensive campaign simulation free. This module reduces rendering and managed-runtime overhead only. Expensive synchronous campaign events still take their real execution time; they are never moved to a later frame or silently dropped.
-
-The repository safety check uses an explicit allowlist for the reviewed `PartyVisual.Tick` patch path and rejects every other Harmony patch surface in compiled code.
+The verifier rejects the removed simulation-deferral sources, direct campaign tick hooks, deferred work queues, and unreviewed Harmony patch surfaces. The only method permitted to skip an original call is the fully-hidden legacy party-visual prefix.
