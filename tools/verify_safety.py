@@ -11,8 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT / "MapPerfFix" / "MapPerfFix.csproj"
 MODULE_XML = ROOT / "MapPerfFix" / "SubModule.xml"
 SUBMODULE = ROOT / "MapPerfFix" / "SubModule.cs"
+BOOTSTRAP = ROOT / "MapPerfFix" / "BootstrapSubModule.cs"
 
 EXPECTED_COMPILED = {
+    "BootstrapSubModule.cs",
     "MapPerfConfig.cs",
     "MapPerfLog.cs",
     "MapPerfSettings.cs",
@@ -217,14 +219,50 @@ def verify() -> None:
         if actual != expected:
             fail("reviewed method changed: " + name + " expected=" + expected + " actual=" + actual)
 
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8-sig")
+    if "MapPerfProbe\\\",\\\"bootstrap.log" in bootstrap:
+        fail("invalid bootstrap path literal")
+    if '"MapPerfProbe"' not in bootstrap or '"bootstrap.log"' not in bootstrap:
+        fail("bootstrap must write %TEMP%\\MapPerfProbe\\bootstrap.log")
+    if "MapPerfConfig" in bootstrap or "MapPerfSettings" in bootstrap or "Harmony" in bootstrap:
+        fail("bootstrap must remain independent of MCM settings and Harmony")
+    if "MapPerfProbe.BootstrapSubModule" in source:
+        fail("main submodule must not own bootstrap loading")
+
     module = ET.fromstring(MODULE_XML.read_text(encoding="utf-8"))
-    if module.find("SingleplayerModule") is None:
-        fail("SubModule.xml must use SingleplayerModule")
-    if module.find("Official") is None:
-        fail("SubModule.xml must declare Official")
-    dll = module.find("./SubModules/SubModule/DLLName")
-    if dll is None or dll.attrib.get("value") != "MapPerfProbe.dll":
-        fail("loader filename must be MapPerfProbe.dll")
+    singleplayer = module.find("Singleplayer")
+    multiplayer = module.find("Multiplayer")
+    if singleplayer is None or singleplayer.attrib.get("value") != "true":
+        fail("SubModule.xml must declare Singleplayer=true")
+    if multiplayer is None or multiplayer.attrib.get("value") != "false":
+        fail("SubModule.xml must declare Multiplayer=false")
+    if module.find("SingleplayerModule") is not None or module.find("Official") is not None:
+        fail("legacy SingleplayerModule/Official loader tags are not allowed")
+
+    dependencies = {
+        node.attrib.get("Id")
+        for node in module.findall("./DependedModules/DependedModule")
+    }
+    if "StoryMode" in dependencies:
+        fail("StoryMode must not be a hard dependency for TOR sandbox campaigns")
+    for required in ("Native", "SandBoxCore", "Sandbox", "Bannerlord.Harmony", "MCMv5"):
+        if required not in dependencies:
+            fail("required module dependency is missing: " + required)
+
+    submodules = module.findall("./SubModules/SubModule")
+    class_types = {
+        node.attrib.get("value")
+        for node in module.findall("./SubModules/SubModule/SubModuleClassType")
+    }
+    if class_types != {"MapPerfProbe.BootstrapSubModule", "MapPerfProbe.SubModule"}:
+        fail("SubModule.xml must load bootstrap and main submodules")
+    if len(submodules) != 2:
+        fail("SubModule.xml must contain exactly two submodules")
+    for node in submodules:
+        dll = node.find("DLLName")
+        if dll is None or dll.attrib.get("value") != "MapPerfProbe.dll":
+            fail("every submodule must load MapPerfProbe.dll")
+
     if "<AssemblyName>MapPerfProbe</AssemblyName>" not in project:
         fail("project output must be MapPerfProbe.dll")
 
