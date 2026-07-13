@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Module>
-  <Name value="MapPerfProbe" />
+<Module xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/BUTR/Bannerlord.XmlSchemas/master/SubModule.xsd">
   <Id value="MapPerfProbe" />
-  <Version value="v2.1.1" />
-  <Singleplayer value="true" />
-  <Multiplayer value="false" />
+  <Name value="MapPerfProbe" />
+  <Version value="v2.1.2" />
+  <DefaultModule value="false" />
+  <ModuleCategory value="Singleplayer" />
+  <ModuleType value="Community" />
   <DependedModules>
     <DependedModule Id="Native" />
     <DependedModule Id="SandBoxCore" />
@@ -17,6 +19,7 @@
       <Name value="MapPerfProbe Bootstrap" />
       <DLLName value="MapPerfProbe.dll" />
       <SubModuleClassType value="MapPerfProbe.BootstrapSubModule" />
+      <Assemblies />
       <Tags>
         <Tag key="DedicatedServerType" value="none" />
         <Tag key="IsNoRenderModeElement" value="false" />
@@ -26,6 +29,7 @@
       <Name value="MapPerfProbe SubModule" />
       <DLLName value="MapPerfProbe.dll" />
       <SubModuleClassType value="MapPerfProbe.SubModule" />
+      <Assemblies />
       <Tags>
         <Tag key="DedicatedServerType" value="none" />
         <Tag key="IsNoRenderModeElement" value="false" />
