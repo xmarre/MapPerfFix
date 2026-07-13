@@ -42,7 +42,7 @@ REVIEWED_METHODS = (
 )
 
 EXPECTED_METHOD_HASHES = {
-    "TryInstallHiddenPartyVisualPatch": "05293a4765e8430a967c87bcade6b0b3057df7d7643464361b23efcdc6cdd729",
+    "TryInstallHiddenPartyVisualPatch": "6b2c39054aa984bc5fb21bdfea3d00ea4339ee86dddd734c97a32be0a760876a",
     "FindLegacyPartyVisualTick": "0e8886ed707b4ca5521e37b25302a64ae4dbaf8a31ef178791740e4bc8db568f",
     "HiddenPartyVisualPrefix": "5f3fbc8e11395316b4db81f20250013b3c35bdbb9cf6d1d2d7fe71f06a2d0573",
     "DisableVisualPatchIfCompatibilityChanged": "96b1e8cd6cf202dbe553da154575d893bbaf1ae88998c577dd67cd5af9c14d81",
