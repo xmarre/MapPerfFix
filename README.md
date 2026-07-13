@@ -6,7 +6,7 @@ A Bannerlord campaign-map performance module with one hard invariant: it never s
 
 The previous implementation patched `MapState.OnTick`, `MapState.OnMapModeTick`, `Campaign.RealTick`, periodic event hubs, and behavior ticks with prefixes that returned `false` or replayed the methods later through a queue. Those methods are the campaign simulation path. Deferring them changed event order, produced catch-up bursts, and could omit behavior callbacks entirely.
 
-The project also built `MapPerfProbe.dll` while `SubModule.xml` attempted to load `MapPerfFix.dll`.
+The established module identity and loader contract remain `MapPerfProbe` / `MapPerfProbe.dll`.
 
 ## Safe optimizations
 
@@ -29,7 +29,7 @@ Build `MapPerfFix.sln` in `Release|x64`. The project uses `D:\Spiele\Mount and B
 msbuild MapPerfFix.sln /p:Configuration=Release /p:Platform=x64 /p:BannerlordDir="D:\Your\Bannerlord"
 ```
 
-The output is `MapPerfFix.dll`, matching `SubModule.xml`.
+The output is `MapPerfProbe.dll`, matching `SubModule.xml`.
 
 ## Static safety check
 
