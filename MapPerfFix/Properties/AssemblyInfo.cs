@@ -1,11 +1,11 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-[assembly: AssemblyTitle("MapPerfFix")]
+[assembly: AssemblyTitle("MapPerfProbe")]
 [assembly: AssemblyDescription("Safe campaign-map performance optimizations for Mount & Blade II: Bannerlord")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("")]
-[assembly: AssemblyProduct("MapPerfFix")]
+[assembly: AssemblyProduct("MapPerfProbe")]
 [assembly: AssemblyCopyright("Copyright © 2025-2026")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
