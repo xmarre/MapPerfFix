@@ -1,16 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Module>
-  <Name value="Map Performance Probe" />
+  <Name value="Map Performance Fix" />
   <Id value="MapPerfProbe" />
-  <Version value="v1.0.0" />
+  <Version value="v2.0.0" />
   <Singleplayer value="true" />
   <Multiplayer value="false" />
   <DependedModules>
-    <DependedModule Id="MCMv5" DependentVersion="v5" Optional="true" />
+    <DependedModule Id="Bannerlord.Harmony" />
+    <DependedModule Id="MCMv5" DependentVersion="v5" />
+    <DependedModule Id="Native" />
+    <DependedModule Id="SandBoxCore" />
+    <DependedModule Id="Sandbox" />
   </DependedModules>
   <SubModules>
     <SubModule>
-      <Name value="Map Performance Probe" />
+      <Name value="Map Performance Fix" />
       <DLLName value="MapPerfFix.dll" />
       <SubModuleClassType value="MapPerfProbe.SubModule" />
       <Tags>

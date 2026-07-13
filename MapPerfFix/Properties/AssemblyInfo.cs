@@ -1,33 +1,15 @@
-﻿using System.Reflection;
-using System.Runtime.CompilerServices;
+using System.Reflection;
 using System.Runtime.InteropServices;
 
-// Allgemeine Informationen über eine Assembly werden über die folgenden
-// Attribute gesteuert. Ändern Sie diese Attributwerte, um die Informationen zu ändern,
-// die einer Assembly zugeordnet sind.
-[assembly: AssemblyTitle("MapPerfProbe")]
-[assembly: AssemblyDescription("")]
+[assembly: AssemblyTitle("MapPerfFix")]
+[assembly: AssemblyDescription("Safe campaign-map performance optimizations for Mount & Blade II: Bannerlord")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("")]
-[assembly: AssemblyProduct("MapPerfProbe")]
-[assembly: AssemblyCopyright("Copyright ©  2025")]
+[assembly: AssemblyProduct("MapPerfFix")]
+[assembly: AssemblyCopyright("Copyright © 2025-2026")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
-
-// Durch Festlegen von ComVisible auf FALSE werden die Typen in dieser Assembly
-// für COM-Komponenten unsichtbar.  Wenn Sie auf einen Typ in dieser Assembly von
-// COM aus zugreifen müssen, sollten Sie das ComVisible-Attribut für diesen Typ auf "True" festlegen.
 [assembly: ComVisible(false)]
-
-// Die folgende GUID bestimmt die ID der Typbibliothek, wenn dieses Projekt für COM verfügbar gemacht wird
 [assembly: Guid("5279b009-b8c7-44d4-b2ab-d34c7616f3d2")]
-
-// Versionsinformationen für eine Assembly bestehen aus den folgenden vier Werten:
-//
-//      Hauptversion
-//      Nebenversion
-//      Buildnummer
-//      Revision
-//
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("2.0.0.0")]
+[assembly: AssemblyFileVersion("2.0.0.0")]

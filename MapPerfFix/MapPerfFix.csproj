@@ -8,115 +8,78 @@
     <OutputType>Library</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
     <RootNamespace>MapPerfProbe</RootNamespace>
-    <AssemblyName>MapPerfProbe</AssemblyName>
+    <AssemblyName>MapPerfFix</AssemblyName>
     <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <Deterministic>true</Deterministic>
     <TargetFrameworkProfile />
     <PlatformTarget>x64</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
-  </PropertyGroup>
-  <PropertyGroup>
     <RestoreProjectStyle>PackageReference</RestoreProjectStyle>
+    <BannerlordDir Condition="'$(BannerlordDir)' == ''">D:\Spiele\Mount and Blade II Bannerlord</BannerlordDir>
+    <BannerlordBin>$(BannerlordDir)\bin\Win64_Shipping_Client</BannerlordBin>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
     <DebugSymbols>true</DebugSymbols>
     <OutputPath>bin\x64\Debug\</OutputPath>
     <DefineConstants>DEBUG;TRACE</DefineConstants>
     <DebugType>full</DebugType>
-    <PlatformTarget>x64</PlatformTarget>
     <LangVersion>7.3</LangVersion>
     <ErrorReport>prompt</ErrorReport>
-    <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
     <OutputPath>bin\x64\Release\</OutputPath>
     <DefineConstants>TRACE</DefineConstants>
     <Optimize>true</Optimize>
     <DebugType>pdbonly</DebugType>
-    <PlatformTarget>x64</PlatformTarget>
     <LangVersion>7.3</LangVersion>
     <ErrorReport>prompt</ErrorReport>
-    <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="0Harmony, Version=2.2.2.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>..\packages\Bannerlord.Lib.Harmony.2.2.2\lib\net472\0Harmony.dll</HintPath>
-    </Reference>
     <Reference Include="System" />
-    <Reference Include="TaleWorlds.ActivitySystem">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.ActivitySystem.dll</HintPath>
-    </Reference>
+    <Reference Include="System.Core" />
     <Reference Include="TaleWorlds.CampaignSystem">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.CampaignSystem.dll</HintPath>
-    </Reference>
-    <Reference Include="TaleWorlds.Core">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.Core.dll</HintPath>
-    </Reference>
-    <Reference Include="TaleWorlds.DotNet">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.DotNet.dll</HintPath>
-    </Reference>
-    <Reference Include="TaleWorlds.Engine">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.Engine.dll</HintPath>
-    </Reference>
-    <Reference Include="TaleWorlds.GauntletUI">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.GauntletUI.dll</HintPath>
-    </Reference>
-    <Reference Include="TaleWorlds.Library">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.Library.dll</HintPath>
-    </Reference>
-    <Reference Include="TaleWorlds.LinQuick">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.LinQuick.dll</HintPath>
-    </Reference>
-    <Reference Include="TaleWorlds.Localization">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.Localization.dll</HintPath>
-    </Reference>
-    <Reference Include="TaleWorlds.MountAndBlade">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.MountAndBlade.dll</HintPath>
+      <HintPath>$(BannerlordBin)\TaleWorlds.CampaignSystem.dll</HintPath>
       <Private>False</Private>
     </Reference>
-    <Reference Include="System.Core" />
-    <Reference Include="TaleWorlds.MountAndBlade.Helpers">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.MountAndBlade.Helpers.dll</HintPath>
-    </Reference>
-    <Reference Include="TaleWorlds.NavigationSystem">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.NavigationSystem.dll</HintPath>
-    </Reference>
-    <Reference Include="TaleWorlds.ObjectSystem">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.ObjectSystem.dll</HintPath>
-    </Reference>
-    <Reference Include="TaleWorlds.TwoDimension">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.TwoDimension.dll</HintPath>
+    <Reference Include="TaleWorlds.Core">
+      <HintPath>$(BannerlordBin)\TaleWorlds.Core.dll</HintPath>
+      <Private>False</Private>
     </Reference>
     <Reference Include="TaleWorlds.InputSystem">
-      <HintPath>D:\Spiele\Mount and Blade II Bannerlord\bin\Win64_Shipping_Client\TaleWorlds.InputSystem.dll</HintPath>
+      <HintPath>$(BannerlordBin)\TaleWorlds.InputSystem.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="TaleWorlds.Library">
+      <HintPath>$(BannerlordBin)\TaleWorlds.Library.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="TaleWorlds.MountAndBlade">
+      <HintPath>$(BannerlordBin)\TaleWorlds.MountAndBlade.dll</HintPath>
+      <Private>False</Private>
     </Reference>
   </ItemGroup>
   <ItemGroup>
     <Compile Include="MapPerfConfig.cs" />
-    <Compile Include="MapIdleDrainProbe.cs" />
-    <Compile Include="MapIdleDrainMitigator.cs" />
-    <Compile Include="InitGate.cs" />
-    <Compile Include="PausedMapStateThrottler.cs" />
-    <Compile Include="MapPauseSkipper.cs" />
-    <Compile Include="PauseSimSkipper.cs" />
     <Compile Include="MapPerfLog.cs" />
-    <Compile Include="PeriodicHubDeferrer.cs" />
     <Compile Include="MapPerfSettings.cs" />
-    <Compile Include="MsgFilter.cs" />
     <Compile Include="SubModule.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="SubModule.xml" />
-  </ItemGroup>
-  <ItemGroup>
     <None Include="AGENTS.md" />
-    <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Lib.Harmony">
+      <Version>2.4.2</Version>
+      <PrivateAssets>all</PrivateAssets>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
     <PackageReference Include="Bannerlord.MCM">
       <Version>5.10.1</Version>
+      <PrivateAssets>all</PrivateAssets>
+      <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
