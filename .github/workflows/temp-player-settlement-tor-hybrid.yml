@@ -28,7 +28,9 @@ jobs:
           run-id: 29352502369
 
       - name: Build ToR hybrid scenes package
-        run: python _temp_player_settlement_tor_hybrid/make_package.py
+        run: |
+          python _temp_player_settlement_tor_hybrid/patch_builder.py
+          python _temp_player_settlement_tor_hybrid/make_package.py
 
       - name: Upload package and diagnostics
         if: always()
