@@ -79,7 +79,9 @@ internal static class Program
         var tested = 0;
         var skipped = 0;
 
-        foreach (var type in types.OrderBy(x => x.FullName, StringComparer.Ordinal))
+        foreach (var type in types
+            .Where(x => x.Namespace != null && x.Namespace.StartsWith("BannerlordPlayerSettlement.Patches", StringComparison.Ordinal))
+            .OrderBy(x => x.FullName, StringComparer.Ordinal))
         {
             bool hasClassAttribute;
             bool hasMethodAttribute;
