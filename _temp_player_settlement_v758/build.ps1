@@ -44,11 +44,15 @@ $projectText = Get-Content -Raw $project
 $projectText = $projectText.Replace('<Version>7.5.4</Version>', '<Version>7.5.8</Version>')
 Set-Content -Encoding UTF8 $project $projectText
 
+$armyPatchPath = Join-Path $patchDir 'PlayerArmyWaitSafetyPatch.cs'
 if (-not (Select-String -Path $saveHandlerPath -SimpleMatch 'Clearing completed placement state before save')) { throw '7.5.7 placement reset missing' }
 if (-not (Select-String -Path (Join-Path $patchDir 'LifecycleSafetyPatches.cs') -SimpleMatch 'IsAnyInquiryActive')) { throw '7.5.7 inquiry guard missing' }
-if (-not (Select-String -Path (Join-Path $patchDir 'PlayerArmyWaitSafetyPatch.cs') -SimpleMatch 'mainParty.AttachedTo = null')) { throw 'Army attachment repair missing' }
+if (-not (Select-String -Path $armyPatchPath -SimpleMatch 'completeAndConsistent')) { throw 'Army wait consistency guard missing' }
+if (Select-String -Path $armyPatchPath -SimpleMatch 'mainParty.AttachedTo = null') { throw 'Army wait guard must not detach the player' }
+if (Select-String -Path $armyPatchPath -SimpleMatch 'mainParty.Army = null') { throw 'Army wait guard must not remove the player from an army' }
 
 git -C $src diff | Set-Content -Encoding UTF8 (Join-Path $out 'source.patch')
+Copy-Item $armyPatchPath (Join-Path $out 'PlayerArmyWaitSafetyPatch.cs') -Force
 
 & dotnet build $project -c Beta_Release -p:Platform=x64 --nologo -v:minimal *> (Join-Path $out 'build.log')
 if ($LASTEXITCODE -ne 0) {
@@ -72,7 +76,7 @@ DLL_SHA256=$dllHash
 UpstreamCommit=$expectedCommit
 ReloadLifecycleBase=$reloadCommit
 PlacementStateBase=$v757Commit
-Fixes=repair stale MainParty AttachedTo/Army chain; defer transiently incomplete PlayerArmyWaitBehavior state
+Fixes=non-destructive, menu-specific PlayerArmyWaitBehavior consistency guard during post-placement reload
 "@ | Set-Content -Encoding UTF8 (Join-Path $out 'BUILD_INFO.txt')
 
 Write-Host "PlayerSettlement.dll version: $version"
