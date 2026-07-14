@@ -10,23 +10,28 @@ using TaleWorlds.CampaignSystem.Party;
 namespace BannerlordPlayerSettlement.Patches
 {
     /// <summary>
-    /// Bannerlord 1.3.15 assumes that a non-null MainParty.AttachedTo always has a valid Army,
-    /// and that the player's party has already restored the same Army. A save/reload can restore
-    /// these references over separate load phases. The vanilla OnTick dereferences the incomplete
-    /// chain without null checks.
+    /// Bannerlord 1.3.15 assumes that, while the army-wait menu is active, a non-null
+    /// MainParty.AttachedTo already has a fully restored Army chain. The automatic
+    /// post-placement reload can expose that chain over separate load phases. The vanilla
+    /// method dereferences it without null or consistency checks.
+    ///
+    /// This prefix is deliberately non-destructive: it only suppresses the vanilla tick
+    /// while the exact reference chain it needs is incomplete. It does not detach the
+    /// player or make the player leave an army.
     /// </summary>
     [HarmonyPatch(typeof(PlayerArmyWaitBehavior), "OnTick")]
     internal static class PlayerArmyWaitBehaviorOnTickSafetyPatch
     {
-        private static bool _reportedCurrentEpisode;
+        private static string? _lastEpisodeSignature;
 
         [HarmonyPrefix]
         private static bool Prefix()
         {
             try
             {
+                Campaign? campaign = Campaign.Current;
                 MobileParty? mainParty = MobileParty.MainParty;
-                if (mainParty == null)
+                if (campaign == null || mainParty == null)
                 {
                     return false;
                 }
@@ -34,7 +39,16 @@ namespace BannerlordPlayerSettlement.Patches
                 MobileParty? attachedTo = mainParty.AttachedTo;
                 if (attachedTo == null)
                 {
-                    _reportedCurrentEpisode = false;
+                    _lastEpisodeSignature = null;
+                    return true;
+                }
+
+                // The original method only dereferences AttachedTo.Army when this menu is active.
+                // Do not interfere with unrelated campaign ticks.
+                string? menuId = campaign.CurrentMenuContext?.GameMenu?.StringId;
+                if (!string.Equals(menuId, "army_wait", StringComparison.Ordinal))
+                {
+                    _lastEpisodeSignature = null;
                     return true;
                 }
 
@@ -43,59 +57,55 @@ namespace BannerlordPlayerSettlement.Patches
                 MobileParty? heroParty = Hero.MainHero?.PartyBelongedTo;
                 Army? heroArmy = heroParty?.Army;
 
-                bool staleAttachment = attachedArmy == null ||
-                                       mainArmy == null ||
-                                       !ReferenceEquals(attachedArmy, mainArmy);
+                bool completeAndConsistent = attachedArmy != null &&
+                                             mainArmy != null &&
+                                             heroParty != null &&
+                                             heroArmy != null &&
+                                             attachedArmy.LeaderParty != null &&
+                                             mainArmy.LeaderParty != null &&
+                                             heroArmy.LeaderParty != null &&
+                                             ReferenceEquals(attachedArmy, mainArmy) &&
+                                             ReferenceEquals(mainArmy, heroArmy);
 
-                if (staleAttachment)
+                if (!completeAndConsistent)
                 {
-                    LogOnce($"Repairing stale army attachment: attachedArmy={(attachedArmy == null ? "null" : "set")}, mainArmy={(mainArmy == null ? "null" : "set")}");
-
-                    // Use Bannerlord's public setter so it removes the party from AttachedParties,
-                    // clears associated event/siege state and resets movement normally.
-                    mainParty.AttachedTo = null;
-
-                    // An orphaned or mismatched Army must also be left through its public setter.
-                    if (mainParty.Army != null &&
-                        (attachedArmy == null ||
-                         !ReferenceEquals(mainParty.Army, attachedArmy) ||
-                         mainParty.Army.LeaderParty == null))
-                    {
-                        mainParty.Army = null;
-                    }
-
+                    string signature =
+                        $"attachedArmy={State(attachedArmy)}, mainArmy={State(mainArmy)}, " +
+                        $"heroParty={(heroParty == null ? "null" : "set")}, heroArmy={State(heroArmy)}, " +
+                        $"sameAttachedMain={ReferenceEquals(attachedArmy, mainArmy)}, " +
+                        $"sameMainHero={ReferenceEquals(mainArmy, heroArmy)}";
+                    LogEpisode(signature);
                     return false;
                 }
 
-                // The core attachment agrees, but some load-time references may still be filled
-                // on a later tick. Skip the unsafe vanilla method without altering valid state.
-                if (attachedArmy.LeaderParty == null ||
-                    heroParty == null ||
-                    heroArmy == null ||
-                    heroArmy.LeaderParty == null)
-                {
-                    LogOnce("Deferring PlayerArmyWaitBehavior until army references finish loading");
-                    return false;
-                }
-
-                _reportedCurrentEpisode = false;
+                _lastEpisodeSignature = null;
                 return true;
             }
             catch (Exception e)
             {
-                LogOnce("Suppressed PlayerArmyWaitBehavior state exception: " + e);
+                LogEpisode("suppressed exception: " + e);
                 return false;
             }
         }
 
-        private static void LogOnce(string message)
+        private static string State(Army? army)
         {
-            if (_reportedCurrentEpisode)
+            if (army == null)
+            {
+                return "null";
+            }
+
+            return army.LeaderParty == null ? "set/leader-null" : "set/leader-set";
+        }
+
+        private static void LogEpisode(string signature)
+        {
+            if (string.Equals(_lastEpisodeSignature, signature, StringComparison.Ordinal))
             {
                 return;
             }
 
-            _reportedCurrentEpisode = true;
+            _lastEpisodeSignature = signature;
             try
             {
                 string userDir = Path.Combine(
@@ -105,7 +115,9 @@ namespace BannerlordPlayerSettlement.Patches
                 Directory.CreateDirectory(directory);
                 File.AppendAllText(
                     Path.Combine(directory, "army_attachment_repair.log"),
-                    DateTime.UtcNow.ToString("O") + " | " + message + Environment.NewLine);
+                    DateTime.UtcNow.ToString("O") +
+                    " | Deferred unsafe PlayerArmyWaitBehavior tick: " +
+                    signature + Environment.NewLine);
             }
             catch
             {
