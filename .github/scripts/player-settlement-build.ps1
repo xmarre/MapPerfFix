@@ -5,8 +5,11 @@ $out = Join-Path $payload 'out'
 New-Item -ItemType Directory -Force -Path $payload,$out | Out-Null
 
 try {
-    git clone --filter=blob:none --no-checkout https://github.com/BOTLANNER/BannerlordPlayerSettlement.git $src 2>&1 | Out-Null
-    git -C $src checkout 52d86c7480778afb83e476ac742895f73fbf6d7f -- . 2>&1 | Out-Null
+    $expectedCommit = '52d86c7480778afb83e476ac742895f73fbf6d7f'
+    git clone --depth=1 https://github.com/BOTLANNER/BannerlordPlayerSettlement.git $src 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit code $LASTEXITCODE" }
+    $actualCommit = (git -C $src rev-parse HEAD).Trim()
+    if ($actualCommit -ne $expectedCommit) { throw "Unexpected upstream HEAD: $actualCommit (expected $expectedCommit)" }
 
     function Get-LatestPackageVersion([string]$id, [string]$prefix) {
         $index = Invoke-RestMethod "https://api.nuget.org/v3-flatcontainer/$($id.ToLowerInvariant())/index.json"
