@@ -1,0 +1,40 @@
+name: Temporary Player Settlement 7.5.7 build
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '_temp_player_settlement_v757/**'
+      - '.github/workflows/temp-player-settlement-v757.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download validated 7.5.4 native-visual build inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: player-settlement-native-visuals
+          path: _downloaded_native
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: xmarre/MapPerfFix
+          run-id: 29352502369
+
+      - name: Build Player Settlement 7.5.7
+        shell: pwsh
+        run: ./_temp_player_settlement_v757/build.ps1
+
+      - name: Upload DLL and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: player-settlement-v757-placement-state-fix
+          path: _player_settlement_v757_build/out
+          if-no-files-found: error
