@@ -17,10 +17,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Publish self-contained inspector
-        run: dotnet publish _temp_assembly_inspector/AssemblyInspector.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -o _temp_assembly_inspector/out
-      - name: Upload inspector
+        shell: bash
+        run: |
+          set +e
+          dotnet publish _temp_assembly_inspector/AssemblyInspector.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -o _temp_assembly_inspector/out > _temp_assembly_inspector/build.log 2>&1
+          status=$?
+          cat _temp_assembly_inspector/build.log
+          exit $status
+      - name: Upload inspector and diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: assembly-inspector-linux-x64
-          path: _temp_assembly_inspector/out
+          path: |
+            _temp_assembly_inspector/out
+            _temp_assembly_inspector/build.log
           if-no-files-found: error
