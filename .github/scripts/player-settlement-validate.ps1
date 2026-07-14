@@ -81,9 +81,20 @@ internal static class Program
 
         foreach (var type in types.OrderBy(x => x.FullName, StringComparer.Ordinal))
         {
-            var hasClassAttribute = type.GetCustomAttributes(typeof(HarmonyPatch), false).Length != 0;
-            var hasMethodAttribute = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance)
-                .Any(method => method.GetCustomAttributes(typeof(HarmonyPatch), false).Length != 0);
+            bool hasClassAttribute;
+            bool hasMethodAttribute;
+            try
+            {
+                hasClassAttribute = type.GetCustomAttributes(typeof(HarmonyPatch), false).Length != 0;
+                hasMethodAttribute = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance)
+                    .Any(method => method.GetCustomAttributes(typeof(HarmonyPatch), false).Length != 0);
+            }
+            catch (Exception ex)
+            {
+                failures.Add("FAIL_ATTRIBUTE " + type.FullName + " => " + ex);
+                Console.WriteLine(failures[failures.Count - 1]);
+                continue;
+            }
             if (!hasClassAttribute && !hasMethodAttribute)
                 continue;
 
@@ -126,8 +137,25 @@ if ($LASTEXITCODE -ne 0) {
 
 $exe = Get-ChildItem (Join-Path $projectDir 'bin\Release') -Recurse -Filter 'PatchValidator.exe' | Select-Object -First 1
 if (-not $exe) { throw 'PatchValidator.exe was not produced' }
+$runtimeDir = $exe.Directory.FullName
+$nugetRoot = Join-Path $env:USERPROFILE '.nuget\packages'
+$referencePackages = @{
+    'bannerlord.referenceassemblies.core' = $versions.Core
+    'bannerlord.referenceassemblies.native' = $versions.Native
+    'bannerlord.referenceassemblies.sandbox' = $versions.SandBox
+    'bannerlord.referenceassemblies.storymode' = $versions.StoryMode
+}
+foreach ($entry in $referencePackages.GetEnumerator()) {
+    $packageDir = Join-Path $nugetRoot (Join-Path $entry.Key $entry.Value)
+    if (-not (Test-Path $packageDir)) { throw "Reference package not found: $packageDir" }
+    Get-ChildItem $packageDir -Recurse -Filter '*.dll' | ForEach-Object {
+        Copy-Item $_.FullName (Join-Path $runtimeDir $_.Name) -Force
+    }
+}
+Copy-Item (Resolve-Path $PlayerSettlementDll).Path (Join-Path $runtimeDir 'PlayerSettlement.dll') -Force
+
 $validationLog = Join-Path $OutputDirectory 'patch-validation.log'
-& $exe.FullName (Resolve-Path $PlayerSettlementDll).Path *> $validationLog
+& $exe.FullName (Join-Path $runtimeDir 'PlayerSettlement.dll') *> $validationLog
 $exitCode = $LASTEXITCODE
-Get-Content $validationLog | Select-Object -Last 120 | ForEach-Object { Write-Host $_ }
+Get-Content $validationLog | Select-Object -Last 160 | ForEach-Object { Write-Host $_ }
 if ($exitCode -ne 0) { throw "Harmony patch-target validation failed with exit code $exitCode" }
