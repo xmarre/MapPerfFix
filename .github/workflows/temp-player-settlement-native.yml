@@ -1,0 +1,28 @@
+name: Temporary Player Settlement native visuals build
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '_temp_player_settlement_native/**'
+      - '.github/workflows/temp-player-settlement-native.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Player Settlement native-visual DLL
+        shell: pwsh
+        run: ./_temp_player_settlement_native/build.ps1
+      - name: Upload DLL and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: player-settlement-native-visuals
+          path: _player_settlement_native_build/out
+          if-no-files-found: error
