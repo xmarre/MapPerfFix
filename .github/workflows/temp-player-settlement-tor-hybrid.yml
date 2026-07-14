@@ -1,0 +1,39 @@
+name: Temporary Player Settlement ToR hybrid build
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '_temp_player_settlement_tor_hybrid/**'
+      - '.github/workflows/temp-player-settlement-tor-hybrid.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download validated 7.5.4 native-visual DLL
+        uses: actions/download-artifact@v4
+        with:
+          name: player-settlement-native-visuals
+          path: _downloaded_native
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: xmarre/MapPerfFix
+          run-id: 29352502369
+
+      - name: Build ToR hybrid scenes package
+        run: python _temp_player_settlement_tor_hybrid/make_package.py
+
+      - name: Upload package and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: player-settlement-tor-hybrid-scenes
+          path: _player_settlement_tor_hybrid_build/out
+          if-no-files-found: error
