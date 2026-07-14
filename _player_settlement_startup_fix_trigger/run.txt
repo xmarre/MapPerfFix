@@ -1,0 +1,1 @@
+Build Player Settlement 7.5.2 startup fix against Bannerlord 1.3.15.
