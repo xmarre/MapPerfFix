@@ -1,0 +1,30 @@
+name: Temporary Player Settlement startup fix build
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '_player_settlement_startup_fix_trigger/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Build startup-fixed Player Settlement
+        shell: pwsh
+        run: |
+          $script = Join-Path $env:RUNNER_TEMP 'player-settlement-startup-fix-build.ps1'
+          Invoke-WebRequest 'https://raw.githubusercontent.com/xmarre/MapPerfFix/master/.github/scripts/player-settlement-startup-fix-build.ps1' -OutFile $script
+          & $script
+
+      - name: Upload package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: player-settlement-startup-fix-${{ github.run_number }}
+          path: _player_settlement_startup_fix/out
+          if-no-files-found: error
