@@ -1,0 +1,28 @@
+name: Temporary Player Settlement 7.5.3 build
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '_temp_player_settlement_v753/**'
+      - '.github/workflows/temp-player-settlement-v753.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build resource-safe package
+        shell: pwsh
+        run: ./_temp_player_settlement_v753/build.ps1
+      - name: Upload package and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: player-settlement-v753-resource-safe
+          path: _player_settlement_v753_build/out
+          if-no-files-found: error
