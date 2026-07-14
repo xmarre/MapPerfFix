@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-$root = Join-Path $env:GITHUB_WORKSPACE '_player_settlement_v755_build'
+$root = Join-Path $env:GITHUB_WORKSPACE '_player_settlement_v756_build'
 $src = Join-Path $root 'source'
 $out = Join-Path $root 'out'
 New-Item -ItemType Directory -Force -Path $root,$out | Out-Null
@@ -19,17 +19,19 @@ git -C $src apply $nativePatch.FullName
 if ($LASTEXITCODE -ne 0) { throw "native-visual patch failed: $LASTEXITCODE" }
 
 Copy-Item (Join-Path $env:GITHUB_WORKSPACE '_temp_player_settlement_v755\SaveHandler.cs') (Join-Path $src 'BannerlordPlayerSettlement\SaveHandler.cs') -Force
+python (Join-Path $env:GITHUB_WORKSPACE '_temp_player_settlement_v755\patch_main_v756.py') (Join-Path $src 'BannerlordPlayerSettlement\Main.cs')
+if ($LASTEXITCODE -ne 0) { throw "Main.cs lifecycle patch failed: $LASTEXITCODE" }
 
 $project = Join-Path $src 'BannerlordPlayerSettlement\BannerlordPlayerSettlement.csproj'
 $projectText = Get-Content -Raw $project
-$projectText = $projectText.Replace('<Version>7.5.4</Version>', '<Version>7.5.5</Version>')
+$projectText = $projectText.Replace('<Version>7.5.4</Version>', '<Version>7.5.6</Version>')
 Set-Content -Encoding UTF8 $project $projectText
 
 git -C $src diff | Set-Content -Encoding UTF8 (Join-Path $out 'source.patch')
 
 & dotnet build $project -c Beta_Release -p:Platform=x64 --nologo -v:minimal *> (Join-Path $out 'build.log')
 if ($LASTEXITCODE -ne 0) {
-    Get-Content (Join-Path $out 'build.log') | Select-Object -Last 200 | ForEach-Object { Write-Host $_ }
+    Get-Content (Join-Path $out 'build.log') | Select-Object -Last 240 | ForEach-Object { Write-Host $_ }
     throw "dotnet build failed: $LASTEXITCODE"
 }
 
@@ -40,14 +42,14 @@ Copy-Item $built.FullName (Join-Path $out 'PlayerSettlement.dll') -Force
 if (Test-Path $builtPdb) { Copy-Item $builtPdb (Join-Path $out 'PlayerSettlement.pdb') -Force }
 
 $version = [Reflection.AssemblyName]::GetAssemblyName($built.FullName).Version.ToString()
-if ($version -ne '7.5.5.0') { throw "Unexpected assembly version: $version" }
+if ($version -ne '7.5.6.0') { throw "Unexpected assembly version: $version" }
 
 $dllHash = (Get-FileHash $built.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 @"
 AssemblyVersion=$version
 DLL_SHA256=$dllHash
 UpstreamCommit=$expectedCommit
-Fixes=deferred OnSaveOver reload; no live MapScreen PopScreen
+Fixes=end active campaign; wait for Game and GameManager disposal; load from global state context
 "@ | Set-Content -Encoding UTF8 (Join-Path $out 'BUILD_INFO.txt')
 
 Write-Host "PlayerSettlement.dll version: $version"
