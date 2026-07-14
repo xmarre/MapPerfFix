@@ -1,1 +1,1 @@
-Build attempt 8: compile and patch-target validation with explicit ref/net472 Bannerlord DLL copying.
+Build attempt 9: final patch-target validation with null-safe Harmony result reporting.
