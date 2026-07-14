@@ -53,7 +53,7 @@ namespace BannerlordPlayerSettlement.Patches
         {
             try
             {
-                return InformationManager.IsAnyInquiryActive?.Invoke() != true;
+                return !InformationManager.IsAnyInquiryActive();
             }
             catch (NullReferenceException)
             {
