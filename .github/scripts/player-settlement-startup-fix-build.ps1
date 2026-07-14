@@ -44,36 +44,6 @@ try {
     if (-not $main.Contains($oldStartup)) { throw 'OnSubModuleLoad insertion point was not found' }
     $main = $main.Replace($oldStartup, $newStartup)
 
-    $oldLoader = @'
-        static IEnumerable<ICompatibilityPatch> LoadCompatPatches()
-        {
-            Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
-            foreach (var assembly in assemblies)
-            {
-                foreach (var type in assembly.GetTypes())
-                {
-                    if (typeof(ICompatibilityPatch).IsAssignableFrom(type) && !type.IsInterface && !type.IsAbstract)
-                    {
-                        object? inst = null;
-                        try
-                        {
-                            inst = type.CreateInstance();
-                        }
-                        catch (Exception e)
-                        {
-                            LogManager.Log.NotifyBad(e);
-                        }
-
-                        if (inst is ICompatibilityPatch compatibilityPatch)
-                        {
-                            yield return compatibilityPatch;
-                        }
-
-                    }
-                }
-            }
-        }
-'@
     $newLoader = @'
         static IEnumerable<ICompatibilityPatch> LoadCompatPatches()
         {
@@ -116,9 +86,12 @@ try {
                 }
             }
         }
-'@
-    if (-not $main.Contains($oldLoader)) { throw 'Compatibility loader method was not found' }
-    $main = $main.Replace($oldLoader, $newLoader)
+'@.TrimEnd()
+    $loaderPattern = '(?s)        static IEnumerable<ICompatibilityPatch> LoadCompatPatches\(\)\s*\{.*?\r?\n        \}(?=\r?\n    \}\r?\n\})'
+    $loaderRegex = [regex]::new($loaderPattern)
+    $patchedMain = $loaderRegex.Replace($main, $newLoader, 1)
+    if ($patchedMain -eq $main) { throw 'Compatibility loader method was not found' }
+    $main = $patchedMain
     Set-Content -Encoding UTF8 $mainPath $main
 
     $coreVersion = Get-LatestPackageVersion 'Bannerlord.ReferenceAssemblies.Core' '1.3.15.'
