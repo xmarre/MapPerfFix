@@ -1,5 +1,4 @@
 using System.Collections.Immutable;
-using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 
@@ -39,7 +38,7 @@ foreach (var handle in reader.AssemblyReferences)
 foreach (var typeHandle in reader.TypeDefinitions)
 {
     var type = reader.GetTypeDefinition(typeHandle);
-    var typeName = FullTypeName(reader, typeHandle);
+    var typeName = MetadataNames.Definition(reader, typeHandle);
     var typeMatches = Matches(typeName, filters);
     var methods = new List<string>();
 
@@ -47,12 +46,11 @@ foreach (var typeHandle in reader.TypeDefinitions)
     {
         var method = reader.GetMethodDefinition(methodHandle);
         var methodName = reader.GetString(method.Name);
-        MethodSignature<string>? signature = null;
         string sigText;
         try
         {
-            signature = method.DecodeSignature(provider, genericContext: null);
-            sigText = $"{signature.Value.ReturnType} {methodName}({string.Join(", ", signature.Value.ParameterTypes)})";
+            var signature = method.DecodeSignature(provider, genericContext: null);
+            sigText = $"{signature.ReturnType} {methodName}({string.Join(", ", signature.ParameterTypes)})";
         }
         catch (Exception ex)
         {
@@ -60,9 +58,7 @@ foreach (var typeHandle in reader.TypeDefinitions)
         }
 
         if (typeMatches || Matches(methodName, filters) || Matches(sigText, filters))
-        {
             methods.Add($"METHOD|{typeName}|{sigText}|RVA=0x{method.RelativeVirtualAddress:X8}|Impl={method.ImplAttributes}|Attrs={method.Attributes}");
-        }
     }
 
     if (typeMatches || methods.Count > 0)
@@ -81,23 +77,26 @@ static bool Matches(string value, string[] filters)
     return filters.Any(filter => value.Contains(filter, StringComparison.OrdinalIgnoreCase));
 }
 
-static string FullTypeName(MetadataReader reader, TypeDefinitionHandle handle)
+static class MetadataNames
 {
-    var type = reader.GetTypeDefinition(handle);
-    var name = reader.GetString(type.Name);
-    var declaring = type.GetDeclaringType();
-    if (!declaring.IsNil)
-        return FullTypeName(reader, declaring) + "+" + name;
-    var ns = reader.GetString(type.Namespace);
-    return string.IsNullOrEmpty(ns) ? name : ns + "." + name;
-}
+    public static string Definition(MetadataReader reader, TypeDefinitionHandle handle)
+    {
+        var type = reader.GetTypeDefinition(handle);
+        var name = reader.GetString(type.Name);
+        var declaring = type.GetDeclaringType();
+        if (!declaring.IsNil)
+            return Definition(reader, declaring) + "+" + name;
+        var ns = reader.GetString(type.Namespace);
+        return string.IsNullOrEmpty(ns) ? name : ns + "." + name;
+    }
 
-static string FullTypeName(MetadataReader reader, TypeReferenceHandle handle)
-{
-    var type = reader.GetTypeReference(handle);
-    var name = reader.GetString(type.Name);
-    var ns = reader.GetString(type.Namespace);
-    return string.IsNullOrEmpty(ns) ? name : ns + "." + name;
+    public static string Reference(MetadataReader reader, TypeReferenceHandle handle)
+    {
+        var type = reader.GetTypeReference(handle);
+        var name = reader.GetString(type.Name);
+        var ns = reader.GetString(type.Namespace);
+        return string.IsNullOrEmpty(ns) ? name : ns + "." + name;
+    }
 }
 
 sealed class TypeNameProvider : ISignatureTypeProvider<string, object?>
@@ -134,8 +133,8 @@ sealed class TypeNameProvider : ISignatureTypeProvider<string, object?>
         _ => typeCode.ToString()
     };
     public string GetSZArrayType(string elementType) => elementType + "[]";
-    public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind) => FullTypeName(reader, handle);
-    public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind) => FullTypeName(reader, handle);
+    public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind) => MetadataNames.Definition(reader, handle);
+    public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind) => MetadataNames.Reference(reader, handle);
     public string GetTypeFromSpecification(MetadataReader reader, object? genericContext, TypeSpecificationHandle handle, byte rawTypeKind)
         => reader.GetTypeSpecification(handle).DecodeSignature(this, genericContext);
 }
