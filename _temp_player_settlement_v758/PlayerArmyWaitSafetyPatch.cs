@@ -43,6 +43,8 @@ namespace BannerlordPlayerSettlement.Patches
                     return true;
                 }
 
+                // The original method only dereferences AttachedTo.Army when this menu is active.
+                // Do not interfere with unrelated campaign ticks.
                 string? menuId = campaign.CurrentMenuContext?.GameMenu?.StringId;
                 if (!string.Equals(menuId, "army_wait", StringComparison.Ordinal))
                 {
