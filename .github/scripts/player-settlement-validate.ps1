@@ -109,7 +109,10 @@ internal static class Program
                 }
                 else
                 {
-                    Console.WriteLine("OK " + type.FullName + " => " + string.Join(", ", patched.Select(x => x.DeclaringType.FullName + "." + x.Name)));
+                    var targets = patched.Select(method => method == null
+                        ? "<null-placeholder>"
+                        : (method.DeclaringType == null ? "<unknown-type>" : method.DeclaringType.FullName) + "." + method.Name);
+                    Console.WriteLine("OK " + type.FullName + " => " + string.Join(", ", targets));
                 }
             }
             catch (Exception ex)
