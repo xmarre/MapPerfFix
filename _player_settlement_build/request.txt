@@ -1,1 +1,1 @@
-Build attempt 9: final patch-target validation with null-safe Harmony result reporting.
+Build attempt 10: final Harmony validation restricted to BannerlordPlayerSettlement.Patches.
