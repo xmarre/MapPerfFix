@@ -24,7 +24,13 @@ jobs:
           status=$?
           cat _temp_assembly_inspector/build.log
           exit $status
-      - name: Upload inspector and diagnostics
+      - name: Collect exact upstream source
+        shell: bash
+        run: |
+          git clone https://github.com/BOTLANNER/BannerlordPlayerSettlement.git _temp_assembly_inspector/upstream
+          git -C _temp_assembly_inspector/upstream checkout 52d86c7480778afb83e476ac742895f73fbf6d7f
+          rm -rf _temp_assembly_inspector/upstream/.git
+      - name: Upload inspector, source, and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -32,4 +38,5 @@ jobs:
           path: |
             _temp_assembly_inspector/out
             _temp_assembly_inspector/build.log
+            _temp_assembly_inspector/upstream
           if-no-files-found: error
