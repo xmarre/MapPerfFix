@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $root = Join-Path $env:GITHUB_WORKSPACE '_player_settlement_startup_fix'
 $src = Join-Path $root 'source'
 $out = Join-Path $root 'out'
-staging = $null
+$staging = $null
 New-Item -ItemType Directory -Force -Path $root,$out | Out-Null
 
 function Get-LatestPackageVersion([string]$id, [string]$prefix) {
