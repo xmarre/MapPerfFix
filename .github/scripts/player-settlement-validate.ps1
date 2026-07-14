@@ -139,23 +139,28 @@ $exe = Get-ChildItem (Join-Path $projectDir 'bin\Release') -Recurse -Filter 'Pat
 if (-not $exe) { throw 'PatchValidator.exe was not produced' }
 $runtimeDir = $exe.Directory.FullName
 $nugetRoot = Join-Path $env:USERPROFILE '.nuget\packages'
-$referencePackages = @{
-    'bannerlord.referenceassemblies.core' = $versions.Core
-    'bannerlord.referenceassemblies.native' = $versions.Native
-    'bannerlord.referenceassemblies.sandbox' = $versions.SandBox
-    'bannerlord.referenceassemblies.storymode' = $versions.StoryMode
-}
-foreach ($entry in $referencePackages.GetEnumerator()) {
-    $packageDir = Join-Path $nugetRoot (Join-Path $entry.Key $entry.Value)
-    if (-not (Test-Path $packageDir)) { throw "Reference package not found: $packageDir" }
-    Get-ChildItem $packageDir -Recurse -Filter '*.dll' | ForEach-Object {
-        Copy-Item $_.FullName (Join-Path $runtimeDir $_.Name) -Force
+$copySpecs = @(
+    @{ Id = 'bannerlord.referenceassemblies.core'; Version = $versions.Core },
+    @{ Id = 'bannerlord.referenceassemblies.native'; Version = $versions.Native },
+    @{ Id = 'bannerlord.referenceassemblies.sandbox'; Version = $versions.SandBox },
+    @{ Id = 'bannerlord.referenceassemblies.storymode'; Version = $versions.StoryMode }
+)
+$copied = 0
+foreach ($spec in $copySpecs) {
+    $refDir = Join-Path $nugetRoot ("$($spec.Id)\$($spec.Version)\ref\net472")
+    if (-not (Test-Path $refDir)) { throw "Reference directory not found: $refDir" }
+    $dlls = @(Get-ChildItem $refDir -File -Filter '*.dll')
+    if ($dlls.Count -eq 0) { throw "No reference DLLs found: $refDir" }
+    foreach ($dll in $dlls) {
+        Copy-Item $dll.FullName (Join-Path $runtimeDir $dll.Name) -Force
+        $copied++
     }
 }
+Write-Host "Copied $copied Bannerlord reference DLLs into validator runtime."
 Copy-Item (Resolve-Path $PlayerSettlementDll).Path (Join-Path $runtimeDir 'PlayerSettlement.dll') -Force
 
 $validationLog = Join-Path $OutputDirectory 'patch-validation.log'
 & $exe.FullName (Join-Path $runtimeDir 'PlayerSettlement.dll') *> $validationLog
 $exitCode = $LASTEXITCODE
-Get-Content $validationLog | Select-Object -Last 160 | ForEach-Object { Write-Host $_ }
+Get-Content $validationLog | Select-Object -Last 200 | ForEach-Object { Write-Host $_ }
 if ($exitCode -ne 0) { throw "Harmony patch-target validation failed with exit code $exitCode" }
