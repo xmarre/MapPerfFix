@@ -14,30 +14,22 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
-      - name: Build against Bannerlord 1.3.15
+      - name: Compile Player Settlement against Bannerlord 1.3.15
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $root = (Resolve-Path '.').Path
-          $payload = Join-Path $root '_player_settlement_build'
+          $payload = Join-Path $env:GITHUB_WORKSPACE '_player_settlement_build'
           $src = Join-Path $payload 'source'
           $out = Join-Path $payload 'out'
           New-Item -ItemType Directory -Force -Path $payload,$out | Out-Null
 
           try {
-            git clone --filter=blob:none --no-checkout https://github.com/BOTLANNER/BannerlordPlayerSettlement.git $src
-            git -C $src checkout 52d86c7480778afb83e476ac742895f73fbf6d7f -- .
-            Compress-Archive -Path (Join-Path $src '*') -DestinationPath (Join-Path $out 'upstream-source.zip') -Force
+            git clone --filter=blob:none --no-checkout https://github.com/BOTLANNER/BannerlordPlayerSettlement.git $src 2>&1 | Out-Null
+            git -C $src checkout 52d86c7480778afb83e476ac742895f73fbf6d7f -- . 2>&1 | Out-Null
+            Compress-Archive -Path (Join-Path $src 'PlayerSettlement_TOR'),(Join-Path $src 'BannerlordPlayerSettlement\_Module') -DestinationPath (Join-Path $out 'module-assets.zip') -Force
 
             function Get-LatestPackageVersion([string]$id, [string]$prefix) {
-              $lower = $id.ToLowerInvariant()
-              $index = Invoke-RestMethod "https://api.nuget.org/v3-flatcontainer/$lower/index.json"
+              $index = Invoke-RestMethod "https://api.nuget.org/v3-flatcontainer/$($id.ToLowerInvariant())/index.json"
               $matches = @($index.versions | Where-Object { $_ -like "$prefix*" })
               if ($matches.Count -eq 0) { throw "No $id package version starts with $prefix" }
               return $matches[-1]
@@ -48,7 +40,6 @@ jobs:
             $sandboxVersion = Get-LatestPackageVersion 'Bannerlord.ReferenceAssemblies.SandBox' '1.3.15.'
             $storyVersion = Get-LatestPackageVersion 'Bannerlord.ReferenceAssemblies.StoryMode' '1.3.15.'
             "Core=$coreVersion`nNative=$nativeVersion`nSandBox=$sandboxVersion`nStoryMode=$storyVersion" | Set-Content -Encoding UTF8 (Join-Path $out 'reference-versions.txt')
-            Write-Host "Reference versions: Core=$coreVersion Native=$nativeVersion SandBox=$sandboxVersion StoryMode=$storyVersion"
 
             $project = Join-Path $src 'BannerlordPlayerSettlement\BannerlordPlayerSettlement.csproj'
             $xml = Get-Content -Raw $project
@@ -73,20 +64,23 @@ jobs:
             git -C $src diff | Set-Content -Encoding UTF8 (Join-Path $out 'source.patch')
             Copy-Item $project (Join-Path $out 'BannerlordPlayerSettlement.csproj') -Force
 
-            $buildOutput = & dotnet build $project -c Beta_Release -p:Platform=x64 --nologo -v:minimal 2>&1
+            & dotnet build $project -c Beta_Release -p:Platform=x64 --nologo -v:minimal *> (Join-Path $out 'build.log')
             $buildExit = $LASTEXITCODE
-            $buildOutput | Tee-Object -FilePath (Join-Path $out 'build.log')
+            if ($buildExit -ne 0) {
+              Write-Host '=== Focused build errors ==='
+              Select-String -Path (Join-Path $out 'build.log') -Pattern 'error CS|error NU|error MSB|: error ' | Select-Object -Last 80 | ForEach-Object { Write-Host $_.Line }
+              throw "dotnet build failed with exit code $buildExit"
+            }
 
             $built = Get-ChildItem (Join-Path $src 'BannerlordPlayerSettlement\bin') -Recurse -Filter 'PlayerSettlement.dll' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($built) {
-              Copy-Item $built.FullName (Join-Path $out 'PlayerSettlement.dll') -Force
-              $pdb = [System.IO.Path]::ChangeExtension($built.FullName, '.pdb')
-              if (Test-Path $pdb) { Copy-Item $pdb (Join-Path $out 'PlayerSettlement.pdb') -Force }
-            }
-            if ($buildExit -ne 0) { throw "dotnet build failed with exit code $buildExit" }
             if (-not $built) { throw 'PlayerSettlement.dll was not produced' }
+            Copy-Item $built.FullName (Join-Path $out 'PlayerSettlement.dll') -Force
+            $pdb = [System.IO.Path]::ChangeExtension($built.FullName, '.pdb')
+            if (Test-Path $pdb) { Copy-Item $pdb (Join-Path $out 'PlayerSettlement.pdb') -Force }
+            Write-Host "Compiled: $($built.FullName)"
           }
           catch {
+            Write-Host "FATAL: $($_.Exception.Message)"
             ($_ | Out-String) | Set-Content -Encoding UTF8 (Join-Path $out 'fatal.log')
             throw
           }
@@ -95,6 +89,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: player-settlement-build
+          name: player-settlement-build-${{ github.run_number }}
           path: _player_settlement_build/out
           if-no-files-found: error
