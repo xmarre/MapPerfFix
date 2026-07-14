@@ -21,6 +21,16 @@ jobs:
           Invoke-WebRequest 'https://raw.githubusercontent.com/xmarre/MapPerfFix/master/.github/scripts/player-settlement-build.ps1' -OutFile $script
           & $script
 
+      - name: Validate Harmony patch targets
+        shell: pwsh
+        run: |
+          $script = Join-Path $env:RUNNER_TEMP 'player-settlement-validate.ps1'
+          Invoke-WebRequest 'https://raw.githubusercontent.com/xmarre/MapPerfFix/master/.github/scripts/player-settlement-validate.ps1' -OutFile $script
+          & $script `
+            -PlayerSettlementDll (Join-Path $env:GITHUB_WORKSPACE '_player_settlement_build\out\PlayerSettlement.dll') `
+            -ReferenceVersionsFile (Join-Path $env:GITHUB_WORKSPACE '_player_settlement_build\out\reference-versions.txt') `
+            -OutputDirectory (Join-Path $env:GITHUB_WORKSPACE '_player_settlement_build\out')
+
       - name: Upload build output
         if: always()
         uses: actions/upload-artifact@v4
