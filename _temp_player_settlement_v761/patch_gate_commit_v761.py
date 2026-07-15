@@ -23,8 +23,9 @@ source = source.replace(old_condition, "if (gateSupported && gatePlacementFrame 
 
 # The ToR map does not reliably use one FaceIslandIndex for a contiguous landmass. The old
 # comparison made the gate cursor unusable until it happened to cross a matching face.
+old_gate_validation = "bool flag = currentFace.IsValid() && isOnLand && currentFace.FaceIslandIndex == MobileParty.MainParty.CurrentNavigationFace.FaceIslandIndex; // Campaign.Current.MapSceneWrapper.AreFacesOnSameIsland(currentFace, MobileParty.MainParty.CurrentNavigationFace, ignoreDisabled: false);"
 replace_once(
-    "bool flag = currentFace.IsValid() && isOnLand && currentFace.FaceIslandIndex == MobileParty.MainParty.CurrentNavigationFace.FaceIslandIndex; // Campaign.Current.MapSceneWrapper.AreFacesOnSameIsland(currentFace, MobileParty.MainParty.CurrentNavigationFace, ignoreDisabled: false);",
+    old_gate_validation,
     "bool flag = currentFace.IsValid() && isOnLand;",
     "remove brittle gate island validation")
 
@@ -145,7 +146,7 @@ for marker in required:
 
 if old_condition in source:
     raise RuntimeError("old AllowGatePosition serialization gate remains")
-if "FaceIslandIndex == MobileParty.MainParty.CurrentNavigationFace.FaceIslandIndex" in source:
-    raise RuntimeError("old FaceIslandIndex gate validation remains")
+if old_gate_validation in source:
+    raise RuntimeError("old gate FaceIslandIndex validation remains")
 
 path.write_text(source, encoding="utf-8")
