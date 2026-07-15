@@ -88,12 +88,13 @@ replace_once(
 "tick-owned gate click")
 
 # The settlement click is also committed by the preview loop. Remove the base-game island-index
-# assumption, which is not reliable on the ToR map.
+# assumption, which is not reliable on the ToR map. currentFace comes from the land-map cursor
+# intersection in the non-deep-edit block, so a valid face is the correct in-scope test here.
 replace_once(
 '''                        bool flag = currentFace.IsValid() && currentFace.FaceIslandIndex == MobileParty.MainParty.CurrentNavigationFace.FaceIslandIndex; // Campaign.Current.MapSceneWrapper.AreFacesOnSameIsland(currentFace, MobileParty.MainParty.CurrentNavigationFace, ignoreDisabled: false);
                         mapScreen.SceneLayer.ActiveCursor = (flag ? CursorType.Default : CursorType.Disabled);
                         PlacementSupported = flag;''',
-'''                        bool flag = currentFace.IsValid() && isOnLand;
+'''                        bool flag = currentFace.IsValid();
                         mapScreen.SceneLayer.ActiveCursor = (flag ? CursorType.Default : CursorType.Disabled);
                         PlacementSupported = flag;
 
@@ -201,7 +202,7 @@ required = [
     "Settlement committed in placement tick",
     "ForceRuntimeGatePosition(townSettlement, gPos)",
     "gate_placement.log",
-    "bool flag = currentFace.IsValid() && isOnLand;",
+    "bool flag = currentFace.IsValid();",
 ]
 for marker in required:
     if marker not in source:
