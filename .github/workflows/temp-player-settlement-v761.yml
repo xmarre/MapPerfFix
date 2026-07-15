@@ -29,7 +29,15 @@ jobs:
 
       - name: Build Player Settlement 7.6.1
         shell: pwsh
-        run: ./_temp_player_settlement_v761/build.ps1
+        run: |
+          try {
+            ./_temp_player_settlement_v761/build.ps1
+          }
+          catch {
+            New-Item -ItemType Directory -Force -Path _player_settlement_v761_build/out | Out-Null
+            ($_ | Out-String) | Set-Content -Encoding UTF8 _player_settlement_v761_build/out/workflow_failure.txt
+            throw
+          }
 
       - name: Upload DLL and diagnostics
         if: always()
