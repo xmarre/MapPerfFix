@@ -5,6 +5,7 @@ using HarmonyLib;
 
 using TaleWorlds.CampaignSystem;
 using TaleWorlds.CampaignSystem.Party;
+using TaleWorlds.Core;
 
 namespace BannerlordPlayerSettlement.Patches
 {
