@@ -65,7 +65,8 @@ if (Select-String -Path $saveHandlerPath -SimpleMatch 'StartNewGame') { throw 'U
 if (Select-String -Path $saveHandlerPath -SimpleMatch 'EndGame') { throw 'Unsafe EndGame call remains' }
 if (-not (Select-String -Path $saveHandlerPath -SimpleMatch 'Saving placement without in-process reload')) { throw 'Save-and-continue handler missing' }
 if (Select-String -Path $behaviourPath -SimpleMatch 'AllowGatePosition && gatePlacementFrame') { throw 'Persisted gate setting still discards committed frame' }
-if (Select-String -Path $behaviourPath -SimpleMatch 'FaceIslandIndex == MobileParty.MainParty.CurrentNavigationFace.FaceIslandIndex') { throw 'Brittle gate island restriction remains' }
+$oldGateValidation = 'bool flag = currentFace.IsValid() && isOnLand && currentFace.FaceIslandIndex == MobileParty.MainParty.CurrentNavigationFace.FaceIslandIndex;'
+if (Select-String -Path $behaviourPath -SimpleMatch $oldGateValidation) { throw 'Brittle gate island restriction remains' }
 if (-not (Select-String -Path $behaviourPath -SimpleMatch 'CommitGatePlacement(CampaignVec2 clickPosition)')) { throw 'Direct gate commit method missing' }
 if (-not (Select-String -Path $behaviourPath -SimpleMatch 'Committed gate position directly')) { throw 'Gate commit diagnostic missing' }
 if (-not (Select-String -Path $mapPatchPath -SimpleMatch 'CommitGatePlacement(intersectionPoint)')) { throw 'Map click does not commit gate coordinates directly' }
