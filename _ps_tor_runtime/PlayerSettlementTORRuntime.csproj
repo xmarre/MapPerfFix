@@ -5,7 +5,7 @@
     <Nullable>disable</Nullable>
     <AssemblyName>PlayerSettlementTORRuntime</AssemblyName>
     <RootNamespace>PlayerSettlementTORRuntime</RootNamespace>
-    <Version>1.0.0</Version>
+    <Version>7.6.6</Version>
     <Platforms>x64</Platforms>
   </PropertyGroup>
   <ItemGroup>
