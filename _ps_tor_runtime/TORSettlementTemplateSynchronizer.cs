@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Xml;
 using TaleWorlds.CampaignSystem;
 using TaleWorlds.CampaignSystem.GameState;
+using TaleWorlds.CampaignSystem.Settlements;
 using TaleWorlds.Core;
 using TaleWorlds.ModuleManager;
 using TaleWorlds.MountAndBlade;
@@ -21,9 +22,6 @@ namespace PlayerSettlementTORRuntime
             if (!(game.GameType is Campaign))
                 return;
 
-            // Campaign event listeners are recreated for each campaign. Register on every
-            // campaign start so returning to the main menu and loading/starting another
-            // campaign in the same process cannot leave the synchronizer detached.
             CampaignEvents.OnSessionLaunchedEvent.AddNonSerializedListener(this, OnSessionLaunched);
         }
 
@@ -47,6 +45,7 @@ namespace PlayerSettlementTORRuntime
         private const string TorCoreModule = "TOR_Core";
         private const string RuntimeModifier = "_ToR_runtime";
         private const string Marker = "_ToR";
+        private const string PlayerSettlementPrefix = "player_settlement_";
 
         internal static void Synchronize()
         {
@@ -60,7 +59,7 @@ namespace PlayerSettlementTORRuntime
 
             var torSettlements = new XmlDocument();
             torSettlements.Load(settlementsPath);
-            var townsByCulture = ReadTorTowns(torSettlements);
+            var townsByCulture = ReadLiveTorTownsInVisualOrder(torSettlements);
             if (townsByCulture.Count == 0)
                 return;
 
@@ -110,33 +109,45 @@ namespace PlayerSettlementTORRuntime
             }
         }
 
-        private static Dictionary<string, List<XmlElement>> ReadTorTowns(XmlDocument document)
+        private static Dictionary<string, List<XmlElement>> ReadLiveTorTownsInVisualOrder(XmlDocument document)
         {
-            var result = new Dictionary<string, List<XmlElement>>(StringComparer.OrdinalIgnoreCase);
+            var xmlById = new Dictionary<string, XmlElement>(StringComparer.OrdinalIgnoreCase);
             XmlNodeList nodes = document.SelectNodes("//Settlement");
-            if (nodes == null)
-                return result;
-
-            foreach (XmlNode node in nodes)
+            if (nodes != null)
             {
-                var settlement = node as XmlElement;
-                if (settlement == null)
+                foreach (XmlElement settlement in nodes.OfType<XmlElement>())
+                {
+                    string id = settlement.GetAttribute("id");
+                    if (!string.IsNullOrEmpty(id))
+                        xmlById[id] = settlement;
+                }
+            }
+
+            var result = new Dictionary<string, List<XmlElement>>(StringComparer.OrdinalIgnoreCase);
+            foreach (Settlement settlement in Settlement.All)
+            {
+                if (settlement == null || !settlement.IsTown || !settlement.IsVisible || settlement.Culture == null)
+                    continue;
+                if (!string.IsNullOrEmpty(settlement.StringId) && settlement.StringId.StartsWith(PlayerSettlementPrefix, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (string.IsNullOrEmpty(settlement.StringId) || !xmlById.TryGetValue(settlement.StringId, out XmlElement source))
                     continue;
 
-                var town = settlement.SelectSingleNode("./Components/Town") as XmlElement;
+                // Guard against any non-town XML object that happens to share an ID.
+                XmlElement town = source.SelectSingleNode("./Components/Town") as XmlElement;
                 if (town == null || IsCastle(town))
                     continue;
 
-                string culture = NormalizeReference(settlement.GetAttribute("culture"), "Culture.");
-                if (string.IsNullOrEmpty(culture))
+                string cultureId = settlement.Culture.StringId;
+                if (string.IsNullOrEmpty(cultureId))
                     continue;
 
-                if (!result.TryGetValue(culture, out List<XmlElement> list))
+                if (!result.TryGetValue(cultureId, out List<XmlElement> list))
                 {
                     list = new List<XmlElement>();
-                    result[culture] = list;
+                    result[cultureId] = list;
                 }
-                list.Add(settlement);
+                list.Add(source);
             }
             return result;
         }
@@ -145,14 +156,6 @@ namespace PlayerSettlementTORRuntime
         {
             string value = town.GetAttribute("is_castle");
             return string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) || value == "1";
-        }
-
-        private static string NormalizeReference(string value, string prefix)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-                return string.Empty;
-            value = value.Trim();
-            return value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? value.Substring(prefix.Length) : value;
         }
 
         private static void RemovePriorRuntimeTemplatesAndStaticTorTowns(IList templateList)
@@ -226,8 +229,6 @@ namespace PlayerSettlementTORRuntime
             settlement.SetAttribute("template_type", "Town");
             settlement.SetAttribute("template_variant", variant.ToString());
 
-            // Campaign-map visuals are supplied by the existing 7.6.5 exact-culture copier.
-            // Never preserve a source prefab override or absolute source port coordinates.
             settlement.RemoveAttribute("prefab_id");
             settlement.RemoveAttribute("port_posX");
             settlement.RemoveAttribute("port_posY");
