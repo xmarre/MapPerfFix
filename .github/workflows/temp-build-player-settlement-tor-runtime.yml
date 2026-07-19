@@ -9,13 +9,17 @@ on:
       - '.github/workflows/build-player-settlement-tor-runtime.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-player-settlement-tor-runtime:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -24,14 +28,19 @@ jobs:
         run: |
           dotnet restore _ps_tor_runtime/PlayerSettlementTORRuntime.csproj
           dotnet build _ps_tor_runtime/PlayerSettlementTORRuntime.csproj -c Release --no-restore
-      - name: Stage artifact
+      - name: Commit build artifact to temporary branch
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path artifact | Out-Null
-          Copy-Item _ps_tor_runtime/bin/Release/net472/PlayerSettlementTORRuntime.dll artifact/
-          if (Test-Path _ps_tor_runtime/bin/Release/net472/PlayerSettlementTORRuntime.pdb) { Copy-Item _ps_tor_runtime/bin/Release/net472/PlayerSettlementTORRuntime.pdb artifact/ }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: PlayerSettlementTORRuntime
-          path: artifact/*
-          if-no-files-found: error
+          New-Item -ItemType Directory -Force -Path build_artifacts | Out-Null
+          Copy-Item _ps_tor_runtime/bin/Release/net472/PlayerSettlementTORRuntime.dll build_artifacts/PlayerSettlementTORRuntime.dll -Force
+          if (Test-Path _ps_tor_runtime/bin/Release/net472/PlayerSettlementTORRuntime.pdb) {
+            Copy-Item _ps_tor_runtime/bin/Release/net472/PlayerSettlementTORRuntime.pdb build_artifacts/PlayerSettlementTORRuntime.pdb -Force
+          }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add build_artifacts/PlayerSettlementTORRuntime.dll build_artifacts/PlayerSettlementTORRuntime.pdb
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Build PlayerSettlementTORRuntime artifact"
+            git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
+          }
