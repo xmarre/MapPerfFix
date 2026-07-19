@@ -7,6 +7,12 @@ on:
     paths:
       - '_ps_tor_runtime/**'
       - '.github/workflows/build-player-settlement-tor-runtime.yml'
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '_ps_tor_runtime/**'
+      - '.github/workflows/build-player-settlement-tor-runtime.yml'
 
 jobs:
   build:
