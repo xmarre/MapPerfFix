@@ -1,0 +1,37 @@
+name: Temporary Player Settlement TOR Runtime Build
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '_ps_tor_runtime/**'
+      - '.github/workflows/build-player-settlement-tor-runtime.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-player-settlement-tor-runtime:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build
+        shell: pwsh
+        run: |
+          dotnet restore _ps_tor_runtime/PlayerSettlementTORRuntime.csproj
+          dotnet build _ps_tor_runtime/PlayerSettlementTORRuntime.csproj -c Release --no-restore
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item _ps_tor_runtime/bin/Release/net472/PlayerSettlementTORRuntime.dll artifact/
+          if (Test-Path _ps_tor_runtime/bin/Release/net472/PlayerSettlementTORRuntime.pdb) { Copy-Item _ps_tor_runtime/bin/Release/net472/PlayerSettlementTORRuntime.pdb artifact/ }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PlayerSettlementTORRuntime
+          path: artifact/*
+          if-no-files-found: error
