@@ -1,0 +1,43 @@
+name: TORCU Temporary Tavern Rumor Radius Build
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  torcu-rumor:
+    if: startsWith(github.head_ref, 'torcu-temp-rumor-radius-1720')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Reconstruct exact v1.7.20 tavern source and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/torcu1720
+          cat torcu-rumor-1720/chunk_*.b64 | tr -d '\r\n' | base64 -d > /tmp/torcu1720/src.tar.xz
+          echo '3956e0dc757aec99b12b642e51883611fdbdda6c5795edb19c1de55a6116043c  /tmp/torcu1720/src.tar.xz' | sha256sum -c -
+          tar -xJf /tmp/torcu1720/src.tar.xz -C /tmp/torcu1720
+          grep -q 'TavernRumorRadius = 75f' /tmp/torcu1720/TavernRumors.cs
+          grep -q 'TavernRumorNearestTownCoverage = 1' /tmp/torcu1720/TavernRumors.cs
+          grep -q 'AssemblyVersion("1.7.20.0")' /tmp/torcu1720/TavernRumors.cs
+          dotnet restore /tmp/torcu1720/TORCareerUniques.TavernRumors.csproj
+          dotnet build /tmp/torcu1720/TORCareerUniques.TavernRumors.csproj -c Release --no-restore
+          test -f /tmp/torcu1720/bin/Release/netstandard2.0/TORCareerUniques.TavernRumors.dll
+          sha256sum /tmp/torcu1720/bin/Release/netstandard2.0/TORCareerUniques.TavernRumors.dll
+      - name: Upload exact build output and source
+        uses: actions/upload-artifact@v4
+        with:
+          name: TORCareerUniques-TavernRumors-v1.7.20
+          path: |
+            /tmp/torcu1720/bin/Release/netstandard2.0/TORCareerUniques.TavernRumors.dll
+            /tmp/torcu1720/bin/Release/netstandard2.0/TORCareerUniques.TavernRumors.pdb
+            /tmp/torcu1720/TavernRumors.cs
+            /tmp/torcu1720/TORCareerUniques.TavernRumors.csproj
+          if-no-files-found: error
+          retention-days: 1
