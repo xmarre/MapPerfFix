@@ -16,11 +16,12 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p /tmp/torcu/chunks /tmp/torcu/prepared
-          for i in $(seq -w 0 10); do
-            curl -fL --retry 4 "https://raw.githubusercontent.com/xmarre/xmarre.github.io/torcu-build-temp-1717/torcu-build/chunks/chunk_${i}.b64" -o "/tmp/torcu/chunks/chunk_${i}.b64"
-          done
-          cat /tmp/torcu/chunks/chunk_*.b64 | base64 --decode > /tmp/torcu/prepared.tar.xz
+          rm -rf /tmp/torcu /tmp/torcu-input
+          mkdir -p /tmp/torcu/prepared
+          git clone --depth 1 --branch torcu-build-temp-1717 https://github.com/xmarre/xmarre.github.io.git /tmp/torcu-input
+          ls -lh /tmp/torcu-input/torcu-build/chunks
+          cat /tmp/torcu-input/torcu-build/chunks/chunk_*.b64 | tr -d '\r\n' | base64 --decode > /tmp/torcu/prepared.tar.xz
+          ls -lh /tmp/torcu/prepared.tar.xz
           xz -t /tmp/torcu/prepared.tar.xz
           tar -xJf /tmp/torcu/prepared.tar.xz -C /tmp/torcu/prepared
           echo '=== PREPARED TREE ==='
