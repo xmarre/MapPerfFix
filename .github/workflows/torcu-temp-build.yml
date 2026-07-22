@@ -11,41 +11,25 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Reconstruct and validate prepared TORCU input
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build tavern rumor helper
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf /tmp/torcu /tmp/torcu-input
-          mkdir -p /tmp/torcu/prepared
-          git clone --quiet --depth 1 --branch torcu-build-temp-1717 https://github.com/xmarre/xmarre.github.io.git /tmp/torcu-input
-          python3 - <<'PY'
-          import base64, hashlib, io, lzma, pathlib, tarfile
-          root=pathlib.Path('/tmp/torcu-input/torcu-build/chunks')
-          files=sorted(root.glob('chunk_*.b64'))
-          print('chunk_count=', len(files))
-          parts=[]
-          for p in files:
-              s=''.join(p.read_text().split())
-              print(p.name, len(s))
-              parts.append(s)
-          joined=''.join(parts)
-          print('joined_chars=', len(joined), 'mod4=', len(joined)%4)
-          raw=base64.b64decode(joined, validate=True)
-          print('decoded_bytes=', len(raw), 'sha256=', hashlib.sha256(raw).hexdigest(), 'magic=', raw[:8].hex())
-          dec=lzma.decompress(raw)
-          print('xz_decompressed_bytes=', len(dec), 'tar_magic=', dec[257:263])
-          with tarfile.open(fileobj=io.BytesIO(dec), mode='r:') as tf:
-              names=tf.getnames()
-              print('archive_members=', len(names))
-              for n in names[:120]: print(n)
-              tf.extractall('/tmp/torcu/prepared')
-          PY
-          echo '=== BUILD CANDIDATES ==='
-          find /tmp/torcu/prepared -type f \( -name '*.sln' -o -name '*.csproj' -o -name '*.sh' -o -name '*.ps1' -o -name '*.md' \) -print | sort
-      - name: Upload reconstructed input
+          dotnet --info
+          dotnet restore torcu-helper/TORCareerUniques.TavernRumors.csproj
+          dotnet build torcu-helper/TORCareerUniques.TavernRumors.csproj -c Release --no-restore
+          test -f torcu-helper/bin/Release/netstandard2.0/TORCareerUniques.TavernRumors.dll
+          sha256sum torcu-helper/bin/Release/netstandard2.0/TORCareerUniques.TavernRumors.dll
+      - name: Upload helper DLL
         uses: actions/upload-artifact@v4
         with:
-          name: torcu-prepared-input
-          path: /tmp/torcu/prepared
+          name: TORCareerUniques-TavernRumors-v1.7.17
+          path: |
+            torcu-helper/bin/Release/netstandard2.0/TORCareerUniques.TavernRumors.dll
+            torcu-helper/bin/Release/netstandard2.0/TORCareerUniques.TavernRumors.pdb
           if-no-files-found: error
           retention-days: 1
