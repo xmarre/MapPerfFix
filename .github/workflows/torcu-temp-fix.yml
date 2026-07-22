@@ -1,0 +1,65 @@
+name: TORCU Temporary Tavern Rumor Fix
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  torcu-fix:
+    if: startsWith(github.head_ref, 'torcu-temp-fix-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Patch terminal dialogue states and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('torcu-helper/TavernRumors.cs')
+          s=p.read_text()
+          replacements={
+            '[assembly: AssemblyVersion("1.7.17.0")]':'[assembly: AssemblyVersion("1.7.18.0")]',
+            '[assembly: AssemblyFileVersion("1.7.17.0")]':'[assembly: AssemblyFileVersion("1.7.18.0")]',
+            'decisionState, "torcu_rumor_hub", script.DeclineText,':'decisionState, "close_window", script.DeclineText,',
+            'resultState, "torcu_rumor_hub", script.SuccessText,':'resultState, "close_window", script.SuccessText,',
+            'resultState, "torcu_rumor_hub", script.LostText,':'resultState, "close_window", script.LostText,',
+            '"tavernkeeper_talk", "That is enough rumor for now.",':'"close_window", "That is enough rumor for now.",',
+          }
+          for old,new in replacements.items():
+              count=s.count(old)
+              if count != 1:
+                  raise SystemExit(f'Expected exactly one occurrence of {old!r}, got {count}')
+              s=s.replace(old,new)
+          p.write_text(s)
+          # Hostile assertions: no terminal branch may route back into rumor hub/native talk.
+          assert 'decisionState, "torcu_rumor_hub", script.DeclineText,' not in s
+          assert 'resultState, "torcu_rumor_hub", script.SuccessText,' not in s
+          assert 'resultState, "torcu_rumor_hub", script.LostText,' not in s
+          assert '"tavernkeeper_talk", "That is enough rumor for now.",' not in s
+          assert 'decisionState, "close_window", script.DeclineText,' in s
+          assert 'resultState, "close_window", script.SuccessText,' in s
+          assert 'resultState, "close_window", script.LostText,' in s
+          assert '"close_window", "That is enough rumor for now.",' in s
+          print('Dialogue terminal-state patch assertions passed.')
+          PY
+          dotnet restore torcu-helper/TORCareerUniques.TavernRumors.csproj
+          dotnet build torcu-helper/TORCareerUniques.TavernRumors.csproj -c Release --no-restore
+          test -f torcu-helper/bin/Release/netstandard2.0/TORCareerUniques.TavernRumors.dll
+          sha256sum torcu-helper/bin/Release/netstandard2.0/TORCareerUniques.TavernRumors.dll
+      - name: Upload fixed helper and exact source
+        uses: actions/upload-artifact@v4
+        with:
+          name: TORCareerUniques-TavernRumors-v1.7.18
+          path: |
+            torcu-helper/bin/Release/netstandard2.0/TORCareerUniques.TavernRumors.dll
+            torcu-helper/bin/Release/netstandard2.0/TORCareerUniques.TavernRumors.pdb
+            torcu-helper/TavernRumors.cs
+            torcu-helper/TORCareerUniques.TavernRumors.csproj
+          if-no-files-found: error
+          retention-days: 1
