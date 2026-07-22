@@ -1,0 +1,36 @@
+name: TORCU Temporary Build
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  torcu-build:
+    if: startsWith(github.head_ref, 'torcu-temp-build-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct prepared TORCU input
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/torcu/chunks /tmp/torcu/prepared
+          for i in $(seq -w 0 10); do
+            curl -fL --retry 4 "https://raw.githubusercontent.com/xmarre/xmarre.github.io/torcu-build-temp-1717/torcu-build/chunks/chunk_${i}.b64" -o "/tmp/torcu/chunks/chunk_${i}.b64"
+          done
+          cat /tmp/torcu/chunks/chunk_*.b64 | base64 --decode > /tmp/torcu/prepared.tar.xz
+          xz -t /tmp/torcu/prepared.tar.xz
+          tar -xJf /tmp/torcu/prepared.tar.xz -C /tmp/torcu/prepared
+          echo '=== PREPARED TREE ==='
+          find /tmp/torcu/prepared -maxdepth 5 -type f -printf '%p\n' | sort
+          echo '=== BUILD CANDIDATES ==='
+          find /tmp/torcu/prepared -type f \( -name '*.sln' -o -name '*.csproj' -o -name '*.sh' -o -name '*.ps1' -o -name '*.md' \) -print | sort
+      - name: Upload reconstructed input
+        uses: actions/upload-artifact@v4
+        with:
+          name: torcu-prepared-input
+          path: /tmp/torcu/prepared
+          if-no-files-found: error
+          retention-days: 1
