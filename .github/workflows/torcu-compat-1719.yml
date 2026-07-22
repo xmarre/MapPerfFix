@@ -1,0 +1,39 @@
+name: TORCU Temporary Compatibility Fix Build
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  torcu-compat:
+    if: startsWith(github.head_ref, 'torcu-temp-fix-1719')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build compatibility fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet restore torcu-compat-1719/TORCareerUniques.CompatibilityFixes.csproj
+          dotnet build torcu-compat-1719/TORCareerUniques.CompatibilityFixes.csproj -c Release --no-restore
+          test -f torcu-compat-1719/bin/Release/netstandard2.0/TORCareerUniques.CompatibilityFixes.dll
+          strings torcu-compat-1719/bin/Release/netstandard2.0/TORCareerUniques.CompatibilityFixes.dll | grep -q 'DailyTickClan'
+          strings torcu-compat-1719/bin/Release/netstandard2.0/TORCareerUniques.CompatibilityFixes.dll | grep -q 'CanCharacterUseItemBasedOnRace'
+          strings torcu-compat-1719/bin/Release/netstandard2.0/TORCareerUniques.CompatibilityFixes.dll | grep -q 'Ossuary Grasp'
+          sha256sum torcu-compat-1719/bin/Release/netstandard2.0/TORCareerUniques.CompatibilityFixes.dll
+      - name: Upload exact build output and source
+        uses: actions/upload-artifact@v4
+        with:
+          name: TORCareerUniques-CompatibilityFixes-v1.7.19
+          path: |
+            torcu-compat-1719/bin/Release/netstandard2.0/TORCareerUniques.CompatibilityFixes.dll
+            torcu-compat-1719/bin/Release/netstandard2.0/TORCareerUniques.CompatibilityFixes.pdb
+            torcu-compat-1719/TORCareerUniques.CompatibilityFixes.cs
+            torcu-compat-1719/TORCareerUniques.CompatibilityFixes.csproj
+          if-no-files-found: error
+          retention-days: 1
