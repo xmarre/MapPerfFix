@@ -12,20 +12,35 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - name: Reconstruct prepared TORCU input
+      - name: Reconstruct and validate prepared TORCU input
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           rm -rf /tmp/torcu /tmp/torcu-input
           mkdir -p /tmp/torcu/prepared
-          git clone --depth 1 --branch torcu-build-temp-1717 https://github.com/xmarre/xmarre.github.io.git /tmp/torcu-input
-          ls -lh /tmp/torcu-input/torcu-build/chunks
-          cat /tmp/torcu-input/torcu-build/chunks/chunk_*.b64 | tr -d '\r\n' | base64 --decode > /tmp/torcu/prepared.tar.xz
-          ls -lh /tmp/torcu/prepared.tar.xz
-          xz -t /tmp/torcu/prepared.tar.xz
-          tar -xJf /tmp/torcu/prepared.tar.xz -C /tmp/torcu/prepared
-          echo '=== PREPARED TREE ==='
-          find /tmp/torcu/prepared -maxdepth 5 -type f -printf '%p\n' | sort
+          git clone --quiet --depth 1 --branch torcu-build-temp-1717 https://github.com/xmarre/xmarre.github.io.git /tmp/torcu-input
+          python3 - <<'PY'
+          import base64, hashlib, io, lzma, pathlib, tarfile
+          root=pathlib.Path('/tmp/torcu-input/torcu-build/chunks')
+          files=sorted(root.glob('chunk_*.b64'))
+          print('chunk_count=', len(files))
+          parts=[]
+          for p in files:
+              s=''.join(p.read_text().split())
+              print(p.name, len(s))
+              parts.append(s)
+          joined=''.join(parts)
+          print('joined_chars=', len(joined), 'mod4=', len(joined)%4)
+          raw=base64.b64decode(joined, validate=True)
+          print('decoded_bytes=', len(raw), 'sha256=', hashlib.sha256(raw).hexdigest(), 'magic=', raw[:8].hex())
+          dec=lzma.decompress(raw)
+          print('xz_decompressed_bytes=', len(dec), 'tar_magic=', dec[257:263])
+          with tarfile.open(fileobj=io.BytesIO(dec), mode='r:') as tf:
+              names=tf.getnames()
+              print('archive_members=', len(names))
+              for n in names[:120]: print(n)
+              tf.extractall('/tmp/torcu/prepared')
+          PY
           echo '=== BUILD CANDIDATES ==='
           find /tmp/torcu/prepared -type f \( -name '*.sln' -o -name '*.csproj' -o -name '*.sh' -o -name '*.ps1' -o -name '*.md' \) -print | sort
       - name: Upload reconstructed input
