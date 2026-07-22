@@ -1,1 +1,1 @@
-TORCU v1.7.17 temporary build trigger 5
+TORCU v1.7.18 tavern rumor dialogue-loop fix trigger
