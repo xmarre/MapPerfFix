@@ -14,8 +14,8 @@ if (-not (Test-Path $helper)) { throw '7.6.11 CultureVisualHelper.cs is missing'
 if (-not (Test-Path $levelPatch)) { throw '7.6.11 level visibility patch is missing' }
 if (-not (Test-Path $visualPatch)) { throw 'Inherited 7.6.9 visual startup patch is missing' }
 
-$expectedHelperHash = '3fd43637f1fb498eb0740883dfddbe56baf62aec3d7aef8839a8b23013b113d1'
-$expectedLevelPatchHash = '238825d8c49a4e2bf31ac6eec6a9dba94a44e5a4caef84ae436cf9766ce80170'
+$expectedHelperHash = '4edb2682d63f9f897640f306c4fdfa5b864b6a6fb1948e9c831baa443be6d4ce'
+$expectedLevelPatchHash = 'c44f68dcf9730d14bb49573d9c459e50ac56a338297004bd0ed8e23f15ce75aa'
 $expectedVisualPatchHash = '161a3f42ee089b8313fc7df71b6f66e118e12a59c8457e6d1e94a57ae6f2e89f'
 
 $actualHelperHash = (Get-FileHash $helper -Algorithm SHA256).Hash.ToLowerInvariant()
