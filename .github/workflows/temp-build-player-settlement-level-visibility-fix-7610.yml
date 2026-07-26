@@ -1,0 +1,53 @@
+name: Temporary Player Settlement Level Visibility Fix 7.6.10 Build
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '_ps_visual_startup_fix_769/**'
+      - '_ps_level_visibility_fix_7610/**'
+      - '.github/workflows/temp-build-player-settlement-level-visibility-fix-7610.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Download validated 7.5.4 source artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: player-settlement-native-visuals
+          path: _downloaded_native
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: xmarre/MapPerfFix
+          run-id: 29352502369
+      - name: Capture source-input hashes
+        shell: pwsh
+        run: |
+          Get-ChildItem _ps_visual_startup_fix_769/input -File |
+            Sort-Object Name |
+            ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name } |
+            Set-Content -Encoding UTF8 source_input_hashes_7610.txt
+          Get-ChildItem _downloaded_native -Recurse -Filter source.patch |
+            ForEach-Object { "{0}  native-7.5.4/source.patch" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } |
+            Add-Content -Encoding UTF8 source_input_hashes_7610.txt
+      - name: Build and validate Player Settlement 7.6.10
+        shell: pwsh
+        run: ./_ps_level_visibility_fix_7610/build.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PlayerSettlement-7.6.10-LevelVisibilityFix
+          path: |
+            source_input_hashes_7610.txt
+            _ps_visual_startup_fix_769_build/out/*
+          if-no-files-found: error
+          retention-days: 1
