@@ -8,6 +8,7 @@ $helper = Join-Path $input 'CultureVisualHelper.cs'
 $levelPatch = Join-Path $input 'patch_level_visibility_7611.py'
 $visualPatch = Join-Path $baseInput 'patch_visual_startup.py'
 $generatedBuild = Join-Path $workspace '_ps_visual_stability_fix_7611/generated_build_7611.ps1'
+$out = Join-Path $workspace '_ps_visual_startup_fix_769_build/out'
 
 if (-not (Test-Path $baseBuild)) { throw 'Validated 7.6.9 build script is missing' }
 if (-not (Test-Path $helper)) { throw '7.6.11 CultureVisualHelper.cs is missing' }
@@ -71,5 +72,14 @@ $script = $script.Replace(
     'Fix=independent ToR prefab instantiation; custom level-visibility physics bypass; visual startup null-safety; raid and siege ownership lifecycle')
 
 Set-Content -Encoding UTF8 $generatedBuild $script
-& $generatedBuild
-if ($LASTEXITCODE -ne 0) { throw "Generated 7.6.11 build failed: $LASTEXITCODE" }
+try
+{
+    & $generatedBuild
+    if (-not $?) { throw 'Generated 7.6.11 build returned failure' }
+}
+catch
+{
+    New-Item -ItemType Directory -Force -Path $out | Out-Null
+    ($_ | Out-String) | Set-Content -Encoding UTF8 (Join-Path $out 'fatal_7.6.11.log')
+    throw
+}
