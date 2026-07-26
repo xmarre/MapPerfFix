@@ -1,4 +1,4 @@
-name: Build Guided Arrow Progression v1.2.0 Hotfix
+name: Build Guided Arrow Progression v1.2.1 MCM Character Button
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ jobs:
     env:
       SOURCE_B64: ci/input/GuidedArrow.Progression.BuildSource.zip.b64
       SOURCE_ZIP: work/transport/GuidedArrow.Progression.BuildSource.zip
-      SOURCE_SHA256: 3568dc461a4b045d5e04dbfa84bae38deff49e7c4222857e69e7eb65cf4661a7
+      SOURCE_SHA256: 86ca015a61ed550ac97a392a7a15fb75ad318ccf063515ed4c1af2371fd32d80
 
     steps:
       - uses: actions/checkout@v4
@@ -42,10 +42,10 @@ jobs:
           dotnet build $project -c Release --no-restore -o artifacts /p:ContinuousIntegrationBuild=true *>&1 | Tee-Object -FilePath artifacts/build.log -Append
           if (-not (Test-Path 'artifacts/GuidedArrow.Progression.dll')) { throw 'GuidedArrow.Progression.dll was not produced' }
           Get-FileHash artifacts/GuidedArrow.Progression.dll -Algorithm SHA256 | Format-List | Out-String | Tee-Object -FilePath artifacts/build.log -Append
-      - name: Upload compiled hotfix
+      - name: Upload compiled build
         uses: actions/upload-artifact@v4
         with:
-          name: GuidedArrow.Progression-v1.2.0-hotfix-bin
+          name: GuidedArrow.Progression-v1.2.1-mcm-character-button-bin
           path: artifacts
           if-no-files-found: error
           retention-days: 7
