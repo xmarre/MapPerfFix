@@ -8,6 +8,12 @@ on:
     paths:
       - 'ci/input/GuidedArrow.Progression.BuildSource.zip.b64'
       - '.github/workflows/build-guided-arrow-progression.yml'
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'ci/input/GuidedArrow.Progression.BuildSource.zip.b64'
+      - '.github/workflows/build-guided-arrow-progression.yml'
 
 permissions:
   contents: read
