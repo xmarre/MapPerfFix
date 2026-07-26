@@ -63,6 +63,21 @@ if (-not [regex]::IsMatch($partyText, $bannerRemovalPattern)) { throw 'Native ba
 '@
 $script = $script.Replace($validationMarker, $validationInsertion)
 
+$oldAssemblyReferenceCheck = @'
+$loadedAssembly = [Reflection.Assembly]::ReflectionOnlyLoadFrom($built.FullName)
+if ($loadedAssembly.GetReferencedAssemblies().Name -contains 'PlayerSettlementCultureVisuals') {
+    throw 'External PlayerSettlementCultureVisuals assembly reference remains'
+}
+'@
+$newAssemblyReferenceCheck = @'
+$assemblyText = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($built.FullName))
+if ($assemblyText.Contains('PlayerSettlementCultureVisuals')) {
+    throw 'External PlayerSettlementCultureVisuals assembly reference remains'
+}
+'@
+if (-not $script.Contains($oldAssemblyReferenceCheck)) { throw 'Inherited reflection-only assembly validation marker not found' }
+$script = $script.Replace($oldAssemblyReferenceCheck, $newAssemblyReferenceCheck)
+
 $script = $script.Replace('7.6.9', '7.6.11')
 $script = $script.Replace('VisualStartupFix', 'VisualPhysicsFix')
 $script = $script.Replace('visual startup', 'visual physics')
