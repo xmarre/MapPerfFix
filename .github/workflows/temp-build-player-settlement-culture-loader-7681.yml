@@ -1,0 +1,40 @@
+name: Temporary Player Settlement Culture Loader 7.6.8.1 Build
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '_ps_culture_loader_7681/**'
+      - '.github/workflows/temp-build-player-settlement-culture-loader-7681.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore _ps_culture_loader_7681/PlayerSettlementCultureVisuals.csproj
+      - name: Build
+        shell: pwsh
+        run: dotnet build _ps_culture_loader_7681/PlayerSettlementCultureVisuals.csproj -c Release --no-restore
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item _ps_culture_loader_7681/bin/Release/net472/PlayerSettlementCultureVisuals.dll artifact/
+          Copy-Item _ps_culture_loader_7681/bin/Release/net472/PlayerSettlementCultureVisuals.pdb artifact/
+          Copy-Item _ps_culture_loader_7681/CultureVisualHelper.cs artifact/
+          Copy-Item _ps_culture_loader_7681/PlayerSettlementCultureVisuals.csproj artifact/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PlayerSettlementCultureVisuals-7.6.8.1
+          path: artifact/*
+          if-no-files-found: error
+          retention-days: 1
