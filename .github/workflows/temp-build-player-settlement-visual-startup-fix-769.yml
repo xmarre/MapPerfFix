@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
@@ -19,10 +20,19 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+      - name: Download validated 7.5.4 source artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: player-settlement-native-visuals
+          path: _downloaded_native
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: xmarre/MapPerfFix
+          run-id: 29352502369
       - name: Build and validate Player Settlement 7.6.9
         shell: pwsh
         run: ./_ps_visual_startup_fix_769/build.ps1
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: PlayerSettlement-7.6.9-VisualStartupFix
           path: _ps_visual_startup_fix_769_build/out/*
