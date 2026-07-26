@@ -147,11 +147,26 @@ replace_once(
 '''                    IMapScene mapSceneWrapper = Campaign.Current?.MapSceneWrapper;
                     string stringId = settlement.StringId;
                     CampaignVec2 position = settlement.Position;
-                    mapSceneWrapper?.AddNewEntityToMapScene(stringId, in position);
                     var scene = __instance.MapScene();
-                    AssignStrategicEntity(__instance,
-                        scene?.GetCampaignEntityWithName(mapEntity.Id)
-                        ?? scene?.GetCampaignEntityWithName(stringId));
+
+                    // ToR template ids are not native campaign-map prefab ids. Recreate their
+                    // visual from an independent same-culture prefab before asking the native
+                    // map-scene wrapper to resolve the generated settlement id.
+                    GameEntity copiedVisual = CultureVisualHelper.TryCopyCreatedSettlementVisual(
+                        scene,
+                        stringId,
+                        settlement.Position.ToVec2());
+                    if (copiedVisual != null)
+                    {
+                        AssignStrategicEntity(__instance, copiedVisual);
+                    }
+                    else
+                    {
+                        mapSceneWrapper?.AddNewEntityToMapScene(stringId, in position);
+                        AssignStrategicEntity(__instance,
+                            scene?.GetCampaignEntityWithName(mapEntity.Id)
+                            ?? scene?.GetCampaignEntityWithName(stringId));
+                    }
                 }
 
                 if (__instance.StrategicEntity == null)
@@ -198,7 +213,15 @@ replace_once(
                         settlement.Town.BesiegerCampPositions1 = matricesFrame.ToArray();
                         settlement.Town.BesiegerCampPositions2 = matricesFrame1.ToArray();
 ''',
-'''                        Campaign.Current?.MapSceneWrapper?.GetSiegeCampFrames(settlement, out matricesFrame, out matricesFrame1);
+'''                        if (Campaign.Current?.MapSceneWrapper != null)
+                        {
+                            Campaign.Current.MapSceneWrapper.GetSiegeCampFrames(settlement, out matricesFrame, out matricesFrame1);
+                        }
+                        else
+                        {
+                            matricesFrame = new List<MatrixFrame>();
+                            matricesFrame1 = new List<MatrixFrame>();
+                        }
                         if (settlement.Town != null)
                         {
                             settlement.Town.BesiegerCampPositions1 = (matricesFrame ?? new List<MatrixFrame>()).ToArray();
