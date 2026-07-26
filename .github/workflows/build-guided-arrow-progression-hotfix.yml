@@ -24,18 +24,37 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: Reassemble and verify exact source archive
+        id: source
+        continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path work/transport, work/source, artifacts | Out-Null
-          $partFiles = Get-ChildItem -LiteralPath $env:SOURCE_PARTS -Filter 'part*.b64' | Sort-Object Name
+          $partFiles = @(Get-ChildItem -LiteralPath $env:SOURCE_PARTS -Filter 'part*.b64' | Sort-Object Name)
+          "Part count: $($partFiles.Count)" | Tee-Object -FilePath artifacts/source-integrity.txt
+          $partFiles | ForEach-Object { "Part: $($_.Name) Length=$((Get-Item $_.FullName).Length)" } | Tee-Object -FilePath artifacts/source-integrity.txt -Append
           if ($partFiles.Count -ne 5) { throw "Expected 5 source parts, found $($partFiles.Count)" }
-          $base64 = [string]::Concat(($partFiles | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) }))
+          $segments = @($partFiles | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) })
+          $base64 = $segments -join ''
+          "Combined Base64 length: $($base64.Length)" | Tee-Object -FilePath artifacts/source-integrity.txt -Append
           [System.IO.File]::WriteAllBytes($env:SOURCE_ZIP, [Convert]::FromBase64String($base64))
           $actual = (Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLowerInvariant()
-          "Source SHA-256: $actual" | Tee-Object -FilePath artifacts/build.log
+          "Expected source SHA-256: $env:SOURCE_SHA256" | Tee-Object -FilePath artifacts/source-integrity.txt -Append
+          "Actual source SHA-256:   $actual" | Tee-Object -FilePath artifacts/source-integrity.txt -Append
           if ($actual -ne $env:SOURCE_SHA256) { throw "Source SHA-256 mismatch. Expected $env:SOURCE_SHA256, got $actual" }
           Expand-Archive -LiteralPath $env:SOURCE_ZIP -DestinationPath work/source -Force
+      - name: Upload source diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GuidedArrow-v1.2.1-source-integrity
+          path: artifacts/source-integrity.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Stop on source failure
+        if: steps.source.outcome != 'success'
+        shell: pwsh
+        run: throw 'Source reassembly or integrity verification failed.'
       - name: Restore and build
         shell: pwsh
         run: |
