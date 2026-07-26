@@ -25,7 +25,7 @@ jobs:
     env:
       SOURCE_B64: ci/input/GuidedArrow.Progression.BuildSource.zip.b64
       SOURCE_ZIP: work/transport/GuidedArrow.Progression.BuildSource.zip
-      SOURCE_SHA256: b5136afb2e55d36cb4f53cbc8e0e6d399fdbfd0aabb57bcb4d9035577fe207cc
+      SOURCE_SHA256: ddacfda649fb686b26f3b6994a36add65aac7415568b60b01e98cfc8917a3728
 
     steps:
       - uses: actions/checkout@v4
