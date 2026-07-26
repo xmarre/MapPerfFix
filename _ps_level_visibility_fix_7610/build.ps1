@@ -8,7 +8,7 @@ $generatedBuild = Join-Path $workspace '_ps_level_visibility_fix_7610/generated_
 if (-not (Test-Path $baseBuild)) { throw 'Validated 7.6.9 build script is missing' }
 if (-not (Test-Path $levelPatch)) { throw '7.6.10 level-visibility patch is missing' }
 
-$expectedPatchHash = '014062c5b969733ee5fc5661d5d1f6917a4b6efa5824a0a9ec7f4fcff1808179'
+$expectedPatchHash = 'f2cac790f29bb5a8d46bbe4b5d787df512ce536b58a5237dae54a37ee81251d8'
 $actualPatchHash = (Get-FileHash $levelPatch -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actualPatchHash -ne $expectedPatchHash) {
     throw "7.6.10 source patch SHA-256 mismatch. Expected=$expectedPatchHash Actual=$actualPatchHash"
