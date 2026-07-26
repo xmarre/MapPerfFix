@@ -41,27 +41,39 @@ jobs:
           New-Item -ItemType Directory -Force -Path work/transport, work/source, artifacts | Out-Null
           [System.IO.File]::WriteAllBytes($env:SOURCE_ZIP, [Convert]::FromBase64String([System.IO.File]::ReadAllText($env:SOURCE_B64)))
           $actual = (Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLowerInvariant()
-          Write-Host "Source SHA-256: $actual"
+          "Source SHA-256: $actual" | Tee-Object -FilePath artifacts/build.log
           if ($actual -ne $env:SOURCE_SHA256) { throw "Source SHA-256 mismatch. Expected $env:SOURCE_SHA256, got $actual" }
           Expand-Archive -LiteralPath $env:SOURCE_ZIP -DestinationPath work/source -Force
           if (-not (Test-Path 'work/source/GuidedArrow.Progression/Source/GuidedArrow.Progression.csproj')) { throw 'Expected project missing after extraction' }
 
-      - name: Restore and build
+      - name: Restore and build with retained diagnostics
+        id: compile
+        continue-on-error: true
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
           $project = 'work/source/GuidedArrow.Progression/Source/GuidedArrow.Progression.csproj'
-          dotnet restore $project
-          dotnet build $project -c Release --no-restore -o artifacts /p:ContinuousIntegrationBuild=true
-          if (-not (Test-Path 'artifacts/GuidedArrow.Progression.dll')) { throw 'GuidedArrow.Progression.dll was not produced' }
-          Get-FileHash artifacts/GuidedArrow.Progression.dll -Algorithm SHA256 | Format-List
+          dotnet restore $project *>&1 | Tee-Object -FilePath artifacts/build.log -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet build $project -c Release --no-restore -o artifacts /p:ContinuousIntegrationBuild=true *>&1 | Tee-Object -FilePath artifacts/build.log -Append
+          exit $LASTEXITCODE
 
-      - name: Upload compiled sidecar
+      - name: Record output hashes
+        if: steps.compile.outcome == 'success'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'artifacts/GuidedArrow.Progression.dll')) { throw 'GuidedArrow.Progression.dll was not produced' }
+          Get-FileHash artifacts/GuidedArrow.Progression.dll -Algorithm SHA256 | Format-List | Out-String | Tee-Object -FilePath artifacts/build.log -Append
+
+      - name: Upload build outputs and diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: GuidedArrow.Progression-v1.2.0-bin
-          path: |
-            artifacts/GuidedArrow.Progression.dll
-            artifacts/GuidedArrow.Progression.pdb
+          path: artifacts
           if-no-files-found: error
           retention-days: 7
+
+      - name: Fail when compilation failed
+        if: steps.compile.outcome != 'success'
+        shell: pwsh
+        run: throw 'Guided Arrow progression compilation failed; inspect build.log artifact.'
