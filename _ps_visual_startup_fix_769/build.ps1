@@ -2,6 +2,25 @@ $ErrorActionPreference = 'Stop'
 
 $workspace = $env:GITHUB_WORKSPACE
 $input = Join-Path $workspace '_ps_visual_startup_fix_769/input'
+function Join-InputParts([string]$name) {
+    $target = Join-Path $input $name
+    if (Test-Path $target) { return }
+    $parts = Get-ChildItem $input -Filter ($name + '.part*') | Sort-Object Name
+    if (-not $parts -or $parts.Count -eq 0) { return }
+    $outStream = [System.IO.File]::Create($target)
+    try {
+        foreach ($part in $parts) {
+            $bytes = [System.IO.File]::ReadAllBytes($part.FullName)
+            $outStream.Write($bytes, 0, $bytes.Length)
+        }
+    }
+    finally {
+        $outStream.Dispose()
+    }
+}
+Join-InputParts 'source.patch'
+Join-InputParts 'PlayerSettlementBehaviour.cs'
+
 $expectedHashes = @{
     'source.patch' = 'ac71cb6b31ef2fae332949164b1ad2d286169637d8e3818cbe16974edf69fec5'
     'PlayerSettlementBehaviour.cs' = 'd61dfc9a8773808219a7c864cc0f235a2266e4f337cbffaff8232d8df56d6323'
