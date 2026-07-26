@@ -1,21 +1,31 @@
 $ErrorActionPreference = 'Stop'
 
 $workspace = $env:GITHUB_WORKSPACE
-$inputZip = Join-Path $workspace '_ps_visual_startup_fix_769/PlayerSettlement_7.6.9_SOURCE_INPUT.zip'
-$expectedInputHash = 'f298b5c9b8ea961845cf15d45b5a2985f2e0b5cfcec7c497c47be6f880f87785'
-$actualInputHash = (Get-FileHash $inputZip -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actualInputHash -ne $expectedInputHash) {
-    throw "SOURCE INPUT SHA-256 mismatch. Expected=$expectedInputHash Actual=$actualInputHash"
+$input = Join-Path $workspace '_ps_visual_startup_fix_769/input'
+$expectedHashes = @{
+    'source.patch' = 'ac71cb6b31ef2fae332949164b1ad2d286169637d8e3818cbe16974edf69fec5'
+    'PlayerSettlementBehaviour.cs' = 'd61dfc9a8773808219a7c864cc0f235a2266e4f337cbffaff8232d8df56d6323'
+    'MapScreenPatch.cs' = '3af8bffe857ffd64bc5ffc5611eabd1f3d2d22c596821665d1480a7877c12641'
+    'SaveHandler.cs' = '126c75a557265c6619b7d7cb09e3d322316d3032a67f84359cd15153ac284b9d'
+    'CultureVisualHelper.cs' = 'bba0336eab51535ecfd594098df09bf94827b9b7f95f29c5c54294a2440c0e62'
+    'patch_visual_startup.py' = 'de1ec95b9e121ba72767c6b8d98e216afb77685e58a739a8dde65b45c1df1824'
 }
-Write-Host "SOURCE INPUT SHA-256 verified: $actualInputHash"
+foreach ($entry in $expectedHashes.GetEnumerator()) {
+    $path = Join-Path $input $entry.Key
+    if (-not (Test-Path $path)) { throw "SOURCE INPUT missing: $($entry.Key)" }
+    $actual = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $entry.Value) {
+        throw "SOURCE INPUT SHA-256 mismatch for $($entry.Key). Expected=$($entry.Value) Actual=$actual"
+    }
+    Write-Host "SOURCE INPUT SHA-256 verified: $($entry.Key) $actual"
+}
+$actualInputHash = ($expectedHashes.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ';'
 
 $root = Join-Path $workspace '_ps_visual_startup_fix_769_build'
-$input = Join-Path $root 'input'
 $src = Join-Path $root 'source'
 $out = Join-Path $root 'out'
 Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path $root,$input,$out | Out-Null
-Expand-Archive -Path $inputZip -DestinationPath $input -Force
+New-Item -ItemType Directory -Force -Path $root,$out | Out-Null
 
 $upstreamCommit = '52d86c7480778afb83e476ac742895f73fbf6d7f'
 git clone https://github.com/BOTLANNER/BannerlordPlayerSettlement.git $src
