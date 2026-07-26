@@ -51,6 +51,16 @@ if ([regex]::IsMatch($partyText, $bannerRemovalPattern)) {
 '@
 $script = $script.Replace($validationMarker, $validationInsertion)
 
+$reflectionMarker = '$loadedAssembly = [Reflection.Assembly]::ReflectionOnlyLoadFrom($built.FullName)'
+$reflectionReplacement = '$assemblyText = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($built.FullName))'
+if (-not $script.Contains($reflectionMarker)) { throw 'Reflection-only validation marker not found' }
+$script = $script.Replace($reflectionMarker, $reflectionReplacement)
+
+$referenceMarker = "if (`$loadedAssembly.GetReferencedAssemblies().Name -contains 'PlayerSettlementCultureVisuals') {"
+$referenceReplacement = "if (`$assemblyText.Contains('PlayerSettlementCultureVisuals')) {"
+if (-not $script.Contains($referenceMarker)) { throw 'Assembly-reference validation marker not found' }
+$script = $script.Replace($referenceMarker, $referenceReplacement)
+
 $script = $script.Replace('7.6.9', '7.6.10')
 $script = $script.Replace('VisualStartupFix', 'LevelVisibilityFix')
 $script = $script.Replace('visual startup', 'level visibility')
