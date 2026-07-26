@@ -28,6 +28,16 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: xmarre/MapPerfFix
           run-id: 29352502369
+      - name: Capture source-input hashes
+        shell: pwsh
+        run: |
+          Get-ChildItem _ps_visual_startup_fix_769/input -File |
+            Sort-Object Name |
+            ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name } |
+            Set-Content -Encoding UTF8 source_input_hashes.txt
+          Get-ChildItem _downloaded_native -Recurse -Filter source.patch |
+            ForEach-Object { "{0}  native-7.5.4/source.patch" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } |
+            Add-Content -Encoding UTF8 source_input_hashes.txt
       - name: Build and validate Player Settlement 7.6.9
         shell: pwsh
         run: ./_ps_visual_startup_fix_769/build.ps1
@@ -35,6 +45,8 @@ jobs:
         if: always()
         with:
           name: PlayerSettlement-7.6.9-VisualStartupFix
-          path: _ps_visual_startup_fix_769_build/out/*
+          path: |
+            source_input_hashes.txt
+            _ps_visual_startup_fix_769_build/out/*
           if-no-files-found: error
           retention-days: 1
