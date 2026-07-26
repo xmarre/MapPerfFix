@@ -423,8 +423,9 @@ namespace PlayerSettlementStartupDiagnostics
             return __exception;
         }
 
-        private static void NotifyBadExceptionPrefix(Exception e)
+        private static void NotifyBadExceptionPrefix(Exception __0)
         {
+            Exception e = __0;
             if (e == null)
             {
                 DiagnosticLog.Write(
