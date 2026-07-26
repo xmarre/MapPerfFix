@@ -41,13 +41,24 @@ jobs:
             Add-Content -Encoding UTF8 source_input_hashes_7610.txt
       - name: Build and validate Player Settlement 7.6.10
         shell: pwsh
-        run: ./_ps_level_visibility_fix_7610/build.ps1
+        run: |
+          $log = '_ps_level_visibility_fix_7610/build_7610_run.log'
+          try {
+            & ./_ps_level_visibility_fix_7610/build.ps1 *>&1 | Tee-Object -FilePath $log
+            if ($LASTEXITCODE -ne 0) { throw "Build wrapper returned $LASTEXITCODE" }
+          }
+          catch {
+            $_ | Out-String | Add-Content -Encoding UTF8 $log
+            throw
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: PlayerSettlement-7.6.10-LevelVisibilityFix
           path: |
             source_input_hashes_7610.txt
+            _ps_level_visibility_fix_7610/build_7610_run.log
+            _ps_level_visibility_fix_7610/generated_build_7610.ps1
             _ps_visual_startup_fix_769_build/out/*
           if-no-files-found: error
           retention-days: 1
