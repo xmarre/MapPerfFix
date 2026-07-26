@@ -1,0 +1,30 @@
+name: Temporary Player Settlement Visual Startup Fix 7.6.9 Build
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - '_ps_visual_startup_fix_769/**'
+      - '.github/workflows/temp-build-player-settlement-visual-startup-fix-769.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build and validate Player Settlement 7.6.9
+        shell: pwsh
+        run: ./_ps_visual_startup_fix_769/build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PlayerSettlement-7.6.9-VisualStartupFix
+          path: _ps_visual_startup_fix_769_build/out/*
+          if-no-files-found: error
+          retention-days: 1
