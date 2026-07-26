@@ -1,0 +1,80 @@
+name: Build Guided Arrow Progression v1.2.0
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/guided-arrow-progression-v1.2.0-build2
+    paths:
+      - 'ci/input/GuidedArrow.Progression.BuildSource.zip.b64'
+      - '.github/workflows/build-guided-arrow-progression.yml'
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'ci/input/GuidedArrow.Progression.BuildSource.zip.b64'
+      - '.github/workflows/build-guided-arrow-progression.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      SOURCE_B64: ci/input/GuidedArrow.Progression.BuildSource.zip.b64
+      SOURCE_ZIP: work/transport/GuidedArrow.Progression.BuildSource.zip
+      SOURCE_SHA256: 3568dc461a4b045d5e04dbfa84bae38deff49e7c4222857e69e7eb65cf4661a7
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Decode and verify exact source archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path work/transport, work/source, artifacts | Out-Null
+          [System.IO.File]::WriteAllBytes($env:SOURCE_ZIP, [Convert]::FromBase64String([System.IO.File]::ReadAllText($env:SOURCE_B64)))
+          $actual = (Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLowerInvariant()
+          "Source SHA-256: $actual" | Tee-Object -FilePath artifacts/build.log
+          if ($actual -ne $env:SOURCE_SHA256) { throw "Source SHA-256 mismatch. Expected $env:SOURCE_SHA256, got $actual" }
+          Expand-Archive -LiteralPath $env:SOURCE_ZIP -DestinationPath work/source -Force
+          if (-not (Test-Path 'work/source/GuidedArrow.Progression/Source/GuidedArrow.Progression.csproj')) { throw 'Expected project missing after extraction' }
+
+      - name: Restore and build with retained diagnostics
+        id: compile
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $project = 'work/source/GuidedArrow.Progression/Source/GuidedArrow.Progression.csproj'
+          dotnet restore $project *>&1 | Tee-Object -FilePath artifacts/build.log -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet build $project -c Release --no-restore -o artifacts /p:ContinuousIntegrationBuild=true *>&1 | Tee-Object -FilePath artifacts/build.log -Append
+          if (-not (Test-Path 'artifacts/GuidedArrow.Progression.dll')) { exit 1 }
+          exit $LASTEXITCODE
+
+      - name: Record output hashes
+        if: steps.compile.outcome == 'success'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'artifacts/GuidedArrow.Progression.dll')) { throw 'GuidedArrow.Progression.dll was not produced' }
+          Get-FileHash artifacts/GuidedArrow.Progression.dll -Algorithm SHA256 | Format-List | Out-String | Tee-Object -FilePath artifacts/build.log -Append
+
+      - name: Upload build outputs and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GuidedArrow.Progression-v1.2.0-bin
+          path: artifacts
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Fail when compilation failed
+        if: steps.compile.outcome != 'success'
+        shell: pwsh
+        run: throw 'Guided Arrow progression compilation failed; inspect build.log artifact.'

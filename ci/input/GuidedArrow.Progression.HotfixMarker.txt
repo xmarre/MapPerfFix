@@ -1,0 +1,2 @@
+Guided Arrow v1.2.0 startup hotfix build marker.
+Source SHA-256: 3568dc461a4b045d5e04dbfa84bae38deff49e7c4222857e69e7eb65cf4661a7

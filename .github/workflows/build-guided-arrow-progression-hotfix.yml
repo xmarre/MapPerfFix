@@ -1,0 +1,41 @@
+name: Inspect Guided Arrow Progression v1.2.1 Source
+
+on:
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      SOURCE_B64: ci/input/GuidedArrow.Progression.BuildSource.zip.b64
+      SOURCE_ZIP: artifacts/GuidedArrow.Progression.BuildSource.repo.zip
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decode repository source archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path artifacts, work/source | Out-Null
+          $text = [System.IO.File]::ReadAllText($env:SOURCE_B64)
+          "Base64 text length: $($text.Length)" | Tee-Object -FilePath artifacts/source-integrity.txt
+          [System.IO.File]::WriteAllBytes($env:SOURCE_ZIP, [Convert]::FromBase64String($text))
+          $actual = (Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLowerInvariant()
+          "Repository source SHA-256: $actual" | Tee-Object -FilePath artifacts/source-integrity.txt -Append
+          Expand-Archive -LiteralPath $env:SOURCE_ZIP -DestinationPath work/source -Force
+          Get-ChildItem -Recurse work/source | Select-Object FullName,Length | Format-Table -AutoSize | Out-String | Tee-Object -FilePath artifacts/source-integrity.txt -Append
+          Copy-Item -Recurse -Force work/source artifacts/extracted-source
+      - name: Upload inspected repository source
+        uses: actions/upload-artifact@v4
+        with:
+          name: GuidedArrow-v1.2.1-repository-source-inspection
+          path: artifacts
+          if-no-files-found: error
+          retention-days: 7
