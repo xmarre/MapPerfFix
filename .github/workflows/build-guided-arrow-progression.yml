@@ -25,7 +25,7 @@ jobs:
     env:
       SOURCE_B64: ci/input/GuidedArrow.Progression.BuildSource.zip.b64
       SOURCE_ZIP: work/transport/GuidedArrow.Progression.BuildSource.zip
-      SOURCE_SHA256: ddacfda649fb686b26f3b6994a36add65aac7415568b60b01e98cfc8917a3728
+      SOURCE_SHA256: 3568dc461a4b045d5e04dbfa84bae38deff49e7c4222857e69e7eb65cf4661a7
 
     steps:
       - uses: actions/checkout@v4
@@ -45,14 +45,6 @@ jobs:
           if ($actual -ne $env:SOURCE_SHA256) { throw "Source SHA-256 mismatch. Expected $env:SOURCE_SHA256, got $actual" }
           Expand-Archive -LiteralPath $env:SOURCE_ZIP -DestinationPath work/source -Force
           if (-not (Test-Path 'work/source/GuidedArrow.Progression/Source/GuidedArrow.Progression.csproj')) { throw 'Expected project missing after extraction' }
-
-          # Temporary compile-probe patch. The final source archive will contain this correction directly.
-          $screen = 'work/source/GuidedArrow.Progression/Source/GuidedArrowMasteryScreen.cs'
-          $text = [System.IO.File]::ReadAllText($screen)
-          $old = 'new GauntletLayer(100, "GuidedArrowMastery")'
-          $new = 'new GauntletLayer("GuidedArrowMastery", 100)'
-          if (-not $text.Contains($old)) { throw 'Expected GauntletLayer constructor text was not found.' }
-          [System.IO.File]::WriteAllText($screen, $text.Replace($old, $new))
 
       - name: Restore and build with retained diagnostics
         id: compile
