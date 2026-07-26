@@ -27,6 +27,9 @@ namespace PlayerSettlementStartupDiagnostics
         private static bool _hotKeyTargetsInstalled;
         private static bool _assemblyLoadSubscribed;
 
+        [ThreadStatic]
+        private static string _currentBoundary;
+
         protected override void OnSubModuleLoad()
         {
             base.OnSubModuleLoad();
@@ -129,6 +132,20 @@ namespace PlayerSettlementStartupDiagnostics
                     else
                         success = false;
                 }
+
+                Type gameLogType = assembly.GetType("BannerlordPlayerSettlement.Utils.GameLog", false);
+                MethodInfo notifyBad = gameLogType != null
+                    ? gameLogType.GetMethod(
+                        "NotifyBad",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                        null,
+                        new[] { typeof(Exception) },
+                        null)
+                    : null;
+                if (PatchNotifyBadBoundary(notifyBad))
+                    installed++;
+                else
+                    success = false;
 
                 Type compatibilityInterface = assembly.GetType(
                     "BannerlordPlayerSettlement.Patches.Compatibility.Interfaces.ICompatibilityPatch",
@@ -277,6 +294,34 @@ namespace PlayerSettlementStartupDiagnostics
             }
         }
 
+        private static bool PatchNotifyBadBoundary(MethodInfo target)
+        {
+            if (target == null)
+            {
+                DiagnosticLog.Write("INSTALL FAILED: GameLog.NotifyBad(Exception) was not found.");
+                return false;
+            }
+
+            if (PatchedMethods.Contains(target))
+                return true;
+
+            try
+            {
+                _harmony.Patch(
+                    target,
+                    prefix: new HarmonyMethod(typeof(SubModule), nameof(NotifyBadExceptionPrefix)));
+                PatchedMethods.Add(target);
+                DiagnosticLog.Write("Installed exception sink: " + FormatMethod(target));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Write(
+                    "INSTALL FAILED: exception sink => " + FormatMethod(target) + "\r\n" + ex);
+                return false;
+            }
+        }
+
         private static bool PatchStaticBoundary(MethodInfo target, string label)
         {
             if (target == null)
@@ -315,7 +360,9 @@ namespace PlayerSettlementStartupDiagnostics
         {
             __state = BoundaryState.Start(
                 DescribeOperation(__originalMethod, __instance, __args),
-                __originalMethod);
+                __originalMethod,
+                _currentBoundary);
+            _currentBoundary = __state.Operation;
             DiagnosticLog.Write("BEGIN " + __state.Operation);
         }
 
@@ -324,6 +371,7 @@ namespace PlayerSettlementStartupDiagnostics
             if (__state == null)
                 return;
             DiagnosticLog.Write("COMPLETE " + __state.Operation + "; elapsed_ms=" + __state.ElapsedMilliseconds);
+            _currentBoundary = __state.PreviousBoundary;
         }
 
         private static Exception InstanceBoundaryFinalizer(Exception __exception, BoundaryState __state)
@@ -335,6 +383,8 @@ namespace PlayerSettlementStartupDiagnostics
                 DiagnosticLog.Write(
                     "FAILED " + operation + "; elapsed_ms=" + elapsed + "\r\n" + __exception);
             }
+            if (__state != null)
+                _currentBoundary = __state.PreviousBoundary;
             return __exception;
         }
 
@@ -345,7 +395,9 @@ namespace PlayerSettlementStartupDiagnostics
         {
             __state = BoundaryState.Start(
                 DescribeOperation(__originalMethod, null, __args),
-                __originalMethod);
+                __originalMethod,
+                _currentBoundary);
+            _currentBoundary = __state.Operation;
             DiagnosticLog.Write("BEGIN " + __state.Operation);
         }
 
@@ -354,6 +406,7 @@ namespace PlayerSettlementStartupDiagnostics
             if (__state == null)
                 return;
             DiagnosticLog.Write("COMPLETE " + __state.Operation + "; elapsed_ms=" + __state.ElapsedMilliseconds);
+            _currentBoundary = __state.PreviousBoundary;
         }
 
         private static Exception StaticBoundaryFinalizer(Exception __exception, BoundaryState __state)
@@ -365,7 +418,24 @@ namespace PlayerSettlementStartupDiagnostics
                 DiagnosticLog.Write(
                     "FAILED " + operation + "; elapsed_ms=" + elapsed + "\r\n" + __exception);
             }
+            if (__state != null)
+                _currentBoundary = __state.PreviousBoundary;
             return __exception;
+        }
+
+        private static void NotifyBadExceptionPrefix(Exception e)
+        {
+            if (e == null)
+            {
+                DiagnosticLog.Write(
+                    "NOTIFY_BAD received a null exception; active_boundary=" +
+                    (_currentBoundary ?? "<none>"));
+                return;
+            }
+
+            DiagnosticLog.Write(
+                "NOTIFY_BAD; active_boundary=" + (_currentBoundary ?? "<none>") +
+                "\r\n" + e);
         }
 
         private static string DescribeOperation(MethodBase method, object instance, object[] args)
@@ -531,13 +601,15 @@ namespace PlayerSettlementStartupDiagnostics
         {
             private readonly long _startedTimestamp;
 
-            private BoundaryState(string operation, MethodBase method)
+            private BoundaryState(string operation, MethodBase method, string previousBoundary)
             {
                 Operation = operation + "; method=" + FormatMethod(method);
+                PreviousBoundary = previousBoundary;
                 _startedTimestamp = Stopwatch.GetTimestamp();
             }
 
             public string Operation { get; private set; }
+            public string PreviousBoundary { get; private set; }
 
             public string ElapsedMilliseconds
             {
@@ -549,9 +621,12 @@ namespace PlayerSettlementStartupDiagnostics
                 }
             }
 
-            public static BoundaryState Start(string operation, MethodBase method)
+            public static BoundaryState Start(
+                string operation,
+                MethodBase method,
+                string previousBoundary)
             {
-                return new BoundaryState(operation, method);
+                return new BoundaryState(operation, method, previousBoundary);
             }
         }
 
