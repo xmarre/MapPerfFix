@@ -20,10 +20,10 @@ if ($actualNativePatchHash -ne $expectedNativePatchHash) {
 Write-Host "Verified 7.5.4 source.patch SHA-256: $actualNativePatchHash"
 
 $verifiedInputs = @{
-    'CultureVisualHelper.cs' = 'bba0336eab51535ecfd594098df09bf94827b9b7f95f29c5c54294a2440c0e62'
-    'patch_visual_startup.py' = 'dc2c61dd09589f9fe8cb2135295a9422b75d5f9e3f001743661c01d8cb19812f'
-    'patch_behavior_769.py' = 'd797b06f39b358e456ebd80f5ae43194824f792054bacd4846efa87194c449d5'
-    'patch_map_screen_769.py' = '25da486a9dc0903845e3a1593a7a38986c9484d92ceee5983547b5ae6710a4dd'
+    'CultureVisualHelper.cs' = '665df6b9d9188b94131f108585e9d544d2ffd495107815cd35f507965e738a1d'
+    'patch_visual_startup.py' = '89b9ed95c39b0873a5716602751c4e0a98d101a14368587efb85ab404ef92125'
+    'patch_behavior_769.py' = '91743ed3426efd1ff48cb99242f7b9568fa597a7317dc15ffd3153a794909c82'
+    'patch_map_screen_769.py' = '114d30c6804293680d42aa1c46a7a99274d3850137ed43abeef25b2a67faeb17'
 }
 foreach ($entry in $verifiedInputs.GetEnumerator()) {
     $path = Join-Path $input $entry.Key
@@ -137,7 +137,6 @@ if (-not $built) { throw 'PlayerSettlement.dll was not produced' }
 $builtPdb = [IO.Path]::ChangeExtension($built.FullName, '.pdb')
 $assemblyVersion = [Reflection.AssemblyName]::GetAssemblyName($built.FullName).Version.ToString()
 if ($assemblyVersion -ne '7.6.9.0') { throw "Unexpected assembly version: $assemblyVersion" }
-$references = [Reflection.AssemblyName]::GetAssemblyName($built.FullName) | Out-Null
 $loadedAssembly = [Reflection.Assembly]::ReflectionOnlyLoadFrom($built.FullName)
 if ($loadedAssembly.GetReferencedAssemblies().Name -contains 'PlayerSettlementCultureVisuals') {
     throw 'External PlayerSettlementCultureVisuals assembly reference remains'
