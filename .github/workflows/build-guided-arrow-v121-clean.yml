@@ -1,0 +1,363 @@
+name: Build Guided Arrow v1.2.1 Clean
+
+on:
+  push:
+    branches:
+      - ci/guided-arrow-v1.2.1-clean
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      SOURCE_B64: ci/input/GuidedArrow.Progression.BuildSource.zip.b64
+      SOURCE_ZIP: work/transport/GuidedArrow.Progression.BuildSource.v4.zip
+      SOURCE_SHA256: 3568dc461a4b045d5e04dbfa84bae38deff49e7c4222857e69e7eb65cf4661a7
+      PATCH_SHA256: f19188632bc913e6136a1434b373f65e917793418918a2b5d0f393d1bf973577
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Verify exact v1.2.0 hotfix source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path work/transport, work/source, artifacts | Out-Null
+          [System.IO.File]::WriteAllBytes($env:SOURCE_ZIP, [Convert]::FromBase64String([System.IO.File]::ReadAllText($env:SOURCE_B64)))
+          $actual = (Get-FileHash $env:SOURCE_ZIP -Algorithm SHA256).Hash.ToLowerInvariant()
+          "Base source SHA-256: $actual" | Tee-Object -FilePath artifacts/build.log
+          if ($actual -ne $env:SOURCE_SHA256) { throw "Base source SHA-256 mismatch. Expected $env:SOURCE_SHA256, got $actual" }
+          Expand-Archive -LiteralPath $env:SOURCE_ZIP -DestinationPath work/source -Force
+      - name: Apply reviewed v1.2.1 source patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $patch = @'
+diff --git a/GuidedArrow.Progression/Source/CharacterScreenButton.cs b/GuidedArrow.Progression/Source/CharacterScreenButton.cs
+new file mode 100644
+index 0000000..87188f7
+--- /dev/null
++++ b/GuidedArrow.Progression/Source/CharacterScreenButton.cs
+@@ -0,0 +1,91 @@
++using System;
++using TaleWorlds.Engine.GauntletUI;
++using TaleWorlds.GauntletUI.Data;
++using TaleWorlds.Library;
++using TaleWorlds.ScreenSystem;
++
++namespace GuidedArrow.Progression
++{
++    internal sealed class CharacterScreenButtonVM : ViewModel
++    {
++        [DataSourceProperty]
++        public string ButtonText => "Guided Arrow Mastery";
++
++        public void ExecuteOpenMastery()
++        {
++            SubModule.OpenScreen();
++        }
++    }
++
++    internal sealed class CharacterScreenButtonController
++    {
++        private ScreenBase _screen;
++        private GauntletLayer _layer;
++        private GauntletMovieIdentifier _movie;
++        private CharacterScreenButtonVM _dataSource;
++
++        internal void Tick()
++        {
++            ScreenBase top = ScreenManager.TopScreen;
++            bool shouldShow = top != null && IsCharacterDeveloperScreen(top);
++
++            if (!shouldShow)
++            {
++                Detach();
++                return;
++            }
++
++            if (ReferenceEquals(_screen, top) && _layer != null) return;
++            Detach();
++            Attach(top);
++        }
++
++        internal void Detach()
++        {
++            try
++            {
++                if (_layer != null && _movie != null) _layer.ReleaseMovie(_movie);
++            }
++            catch { }
++
++            try
++            {
++                if (_dataSource != null) _dataSource.OnFinalize();
++            }
++            catch { }
++
++            try
++            {
++                if (_screen != null && _layer != null) _screen.RemoveLayer(_layer);
++            }
++            catch { }
++
++            _movie = null;
++            _dataSource = null;
++            _layer = null;
++            _screen = null;
++        }
++
++        private void Attach(ScreenBase screen)
++        {
++            try
++            {
++                _screen = screen;
++                _dataSource = new CharacterScreenButtonVM();
++                _layer = new GauntletLayer("GuidedArrowCharacterButton", 220);
++                _screen.AddLayer(_layer);
++                _movie = _layer.LoadMovie("GuidedArrowCharacterButton", _dataSource);
++            }
++            catch
++            {
++                Detach();
++            }
++        }
++
++        private static bool IsCharacterDeveloperScreen(ScreenBase screen)
++        {
++            string name = screen.GetType().Name;
++            return name.IndexOf("CharacterDeveloperScreen", StringComparison.OrdinalIgnoreCase) >= 0;
++        }
++    }
++}
+diff --git a/GuidedArrow.Progression/Source/GuidedArrow.Progression.csproj b/GuidedArrow.Progression/Source/GuidedArrow.Progression.csproj
+index e3adc61..d4dc511 100644
+--- a/GuidedArrow.Progression/Source/GuidedArrow.Progression.csproj
++++ b/GuidedArrow.Progression/Source/GuidedArrow.Progression.csproj
+@@ -5,9 +5,9 @@
+     <AssemblyName>GuidedArrow.Progression</AssemblyName>
+     <RootNamespace>GuidedArrow.Progression</RootNamespace>
+     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+-    <Version>1.2.0</Version>
+-    <FileVersion>1.2.0.0</FileVersion>
+-    <AssemblyVersion>1.2.0.0</AssemblyVersion>
++    <Version>1.2.1</Version>
++    <FileVersion>1.2.1.0</FileVersion>
++    <AssemblyVersion>1.2.1.0</AssemblyVersion>
+     <Deterministic>true</Deterministic>
+     <DebugType>pdbonly</DebugType>
+     <Optimize>true</Optimize>
+@@ -17,6 +17,7 @@
+     <PackageReference Include="Bannerlord.ReferenceAssemblies.Core" Version="1.3.15.110062" />
+     <PackageReference Include="Bannerlord.ReferenceAssemblies.Native" Version="1.3.15.110062" PrivateAssets="All" />
+     <PackageReference Include="Lib.Harmony" Version="2.4.1" PrivateAssets="All" />
++    <PackageReference Include="Bannerlord.MCM" Version="5.12.1" IncludeAssets="compile" />
+     <PackageReference Include="NETStandard.Library" Version="2.0.3" PrivateAssets="All" />
+   </ItemGroup>
+ </Project>
+diff --git a/GuidedArrow.Progression/Source/MasteryViewModels.cs b/GuidedArrow.Progression/Source/MasteryViewModels.cs
+index 5e3fa5d..9662baf 100644
+--- a/GuidedArrow.Progression/Source/MasteryViewModels.cs
++++ b/GuidedArrow.Progression/Source/MasteryViewModels.cs
+@@ -42,7 +42,7 @@ namespace GuidedArrow.Progression
+         private readonly Action _close;
+         private readonly List<SkillNodeVM> _allNodes = new List<SkillNodeVM>();
+         private SkillId _selectedId = SkillId.GuidedRelease;
+-        private string _masteryText, _xpText, _pointsText, _rangedText, _selectedName, _selectedCost, _selectedRequirements, _selectedDescription, _selectedStatus, _progressionText, _messageText;
++        private string _masteryText, _xpText, _pointsText, _rangedText, _selectedName, _selectedCost, _selectedRequirements, _selectedDescription, _selectedStatus, _progressionText, _progressionActionText, _messageText;
+         private int _xpProgress;
+ 
+         internal GuidedArrowMasteryVM(Action close)
+@@ -78,6 +78,7 @@ namespace GuidedArrow.Progression
+         [DataSourceProperty] public string SelectedDescription { get => _selectedDescription; set => Set(ref _selectedDescription, value, nameof(SelectedDescription)); }
+         [DataSourceProperty] public string SelectedStatus { get => _selectedStatus; set => Set(ref _selectedStatus, value, nameof(SelectedStatus)); }
+         [DataSourceProperty] public string ProgressionText { get => _progressionText; set => Set(ref _progressionText, value, nameof(ProgressionText)); }
++        [DataSourceProperty] public string ProgressionActionText { get => _progressionActionText; set => Set(ref _progressionActionText, value, nameof(ProgressionActionText)); }
+         [DataSourceProperty] public string MessageText { get => _messageText; set => Set(ref _messageText, value, nameof(MessageText)); }
+ 
+         public void ExecuteConfirm()
+@@ -103,7 +104,7 @@ namespace GuidedArrow.Progression
+         {
+             ProgressionCampaignBehavior p = ProgressionService.Current;
+             if (p == null) return;
+-            p.SetEnabled(!p.Enabled);
++            ProgressionService.SetEnabledFromUi(!p.Enabled);
+             MessageText = p.Enabled ? "Progression enabled. Existing MCM values are now capped by unlocked skills." : "Progression disabled. Full configured Guided Arrow behaviour restored.";
+             RefreshAll();
+         }
+@@ -122,7 +123,7 @@ namespace GuidedArrow.Progression
+             ProgressionCampaignBehavior p = ProgressionService.Current;
+             if (p == null)
+             {
+-                MasteryText = "Mastery Rank 0"; XpText = "XP 0 / 50"; PointsText = "Points Available: 0"; RangedText = "Ranged Skill: 0"; XpProgress = 0; ProgressionText = "Progression: Unavailable";
++                MasteryText = "Mastery Rank 0"; XpText = "XP 0 / 50"; PointsText = "Points Available: 0"; RangedText = "Ranged Skill: 0"; XpProgress = 0; ProgressionText = "Progression: Unavailable"; ProgressionActionText = "Enable Progression";
+             }
+             else
+             {
+@@ -136,6 +137,7 @@ namespace GuidedArrow.Progression
+                 RangedText = "Ranged Skill: " + p.RangedSkill;
+                 XpProgress = rank >= 15 ? 100 : Math.Max(0, Math.Min(100, (p.Xp - currentThreshold) * 100 / width));
+                 ProgressionText = p.Enabled ? "Progression: ENABLED" : "Progression: DISABLED";
++                ProgressionActionText = p.Enabled ? "Disable Progression" : "Enable Progression";
+             }
+             foreach (SkillNodeVM node in _allNodes) node.Refresh();
+             RefreshSelected();
+diff --git a/GuidedArrow.Progression/Source/ProgressionCampaignBehavior.cs b/GuidedArrow.Progression/Source/ProgressionCampaignBehavior.cs
+index f55a5c3..3f0e13b 100644
+--- a/GuidedArrow.Progression/Source/ProgressionCampaignBehavior.cs
++++ b/GuidedArrow.Progression/Source/ProgressionCampaignBehavior.cs
+@@ -27,9 +27,9 @@ namespace GuidedArrow.Progression
+ 
+         public override void RegisterEvents()
+         {
+-            CampaignEvents.OnSessionLaunchedEvent.AddNonSerializedListener(this, _ => ProgressionService.Attach(this));
+-            CampaignEvents.OnGameLoadedEvent.AddNonSerializedListener(this, _ => ProgressionService.Attach(this));
+-            CampaignEvents.OnNewGameCreatedEvent.AddNonSerializedListener(this, _ => ProgressionService.Attach(this));
++            CampaignEvents.OnSessionLaunchedEvent.AddNonSerializedListener(this, _ => AttachAndApplySettings());
++            CampaignEvents.OnGameLoadedEvent.AddNonSerializedListener(this, _ => AttachAndApplySettings());
++            CampaignEvents.OnNewGameCreatedEvent.AddNonSerializedListener(this, _ => AttachAndApplySettings());
+         }
+ 
+         public override void SyncData(IDataStore dataStore)
+@@ -40,6 +40,13 @@ namespace GuidedArrow.Progression
+             if (_masteryXp == null) _masteryXp = new Dictionary<string, int>();
+             if (_unlockMasks == null) _unlockMasks = new Dictionary<string, int>();
+             ProgressionService.Attach(this);
++            if (dataStore.IsLoading) ProgressionService.ApplyCurrentSetting();
++        }
++
++        private void AttachAndApplySettings()
++        {
++            ProgressionService.Attach(this);
++            ProgressionService.ApplyCurrentSetting();
+         }
+ 
+         internal bool Enabled => _progressionEnabled;
+@@ -181,6 +188,18 @@ namespace GuidedArrow.Progression
+         internal static ProgressionCampaignBehavior Current => _behavior;
+         internal static bool Enabled => _behavior != null && _behavior.Enabled;
+         internal static bool Has(SkillId id) => !Enabled || (_behavior != null && _behavior.Has(id));
++        internal static bool ConfiguredEnabled => ProgressionSettings.Instance != null && ProgressionSettings.Instance.EnableProgression;
++        internal static void ApplyCurrentSetting() => ApplyConfiguredEnabled(ConfiguredEnabled);
++        internal static void ApplyConfiguredEnabled(bool enabled)
++        {
++            if (_behavior != null) _behavior.SetEnabled(enabled);
++        }
++        internal static void SetEnabledFromUi(bool enabled)
++        {
++            ProgressionSettings settings = ProgressionSettings.Instance;
++            if (settings != null) settings.EnableProgression = enabled;
++            else ApplyConfiguredEnabled(enabled);
++        }
+         internal static void NotifyChanged() => Changed?.Invoke();
+         internal static void Detach() { _behavior = null; Changed = null; }
+     }
+diff --git a/GuidedArrow.Progression/Source/ProgressionSettings.cs b/GuidedArrow.Progression/Source/ProgressionSettings.cs
+new file mode 100644
+index 0000000..3767831
+--- /dev/null
++++ b/GuidedArrow.Progression/Source/ProgressionSettings.cs
+@@ -0,0 +1,34 @@
++using MCM.Abstractions.Attributes;
++using MCM.Abstractions.Attributes.v2;
++using MCM.Abstractions.Base.Global;
++
++namespace GuidedArrow.Progression
++{
++    internal sealed class ProgressionSettings : AttributeGlobalSettings<ProgressionSettings>
++    {
++        private bool _enableProgression;
++
++        public override string Id => "GuidedArrow_Progression_v1";
++        public override string DisplayName => "Guided Arrow - Mastery Progression";
++        public override string FolderName => "GuidedArrow";
++        public override string FormatType => "json2";
++
++        [SettingPropertyBool(
++            "Enable Mastery Progression",
++            Order = 0,
++            RequireRestart = false,
++            HintText = "Enables the Guided Arrow mastery tree. Guided Arrow features are restricted by unlocked mastery nodes. This can also be changed from the mastery screen.")]
++        [SettingPropertyGroup("Progression", GroupOrder = 0)]
++        public bool EnableProgression
++        {
++            get => _enableProgression;
++            set
++            {
++                if (_enableProgression == value) return;
++                _enableProgression = value;
++                OnPropertyChanged();
++                ProgressionService.ApplyConfiguredEnabled(value);
++            }
++        }
++    }
++}
+diff --git a/GuidedArrow.Progression/Source/SubModule.cs b/GuidedArrow.Progression/Source/SubModule.cs
+index 4907860..f426b7f 100644
+--- a/GuidedArrow.Progression/Source/SubModule.cs
++++ b/GuidedArrow.Progression/Source/SubModule.cs
+@@ -14,6 +14,7 @@ namespace GuidedArrow.Progression
+     {
+         private Harmony _harmony;
+         private bool _openLatch;
++        private readonly CharacterScreenButtonController _characterButton = new CharacterScreenButtonController();
+ 
+         protected override void OnSubModuleLoad()
+         {
+@@ -31,6 +32,7 @@ namespace GuidedArrow.Progression
+ 
+         public override void OnGameEnd(Game game)
+         {
++            _characterButton.Detach();
+             ProgressionService.Detach();
+             _openLatch = false;
+             base.OnGameEnd(game);
+@@ -39,6 +41,7 @@ namespace GuidedArrow.Progression
+         protected override void OnApplicationTick(float dt)
+         {
+             base.OnApplicationTick(dt);
++            _characterButton.Tick();
+             if (Campaign.Current == null || Mission.Current != null) { _openLatch = false; return; }
+             bool control = Input.IsKeyDown(InputKey.LeftControl) || Input.IsKeyDown(InputKey.RightControl);
+             bool pressed = control && Input.IsKeyPressed(InputKey.U);
+@@ -49,6 +52,7 @@ namespace GuidedArrow.Progression
+         protected override void OnSubModuleUnloaded()
+         {
+             try { _harmony?.UnpatchAll("guidedarrow.progression.1.2.0"); } catch { }
++            _characterButton.Detach();
+             ProgressionService.Detach();
+             base.OnSubModuleUnloaded();
+         }
+'@
+          [System.IO.File]::WriteAllText('work/v121.patch', $patch, [System.Text.UTF8Encoding]::new($false))
+          $actualPatch = (Get-FileHash 'work/v121.patch' -Algorithm SHA256).Hash.ToLowerInvariant()
+          "Patch SHA-256: $actualPatch" | Tee-Object -FilePath artifacts/build.log -Append
+          if ($actualPatch -ne $env:PATCH_SHA256) { throw "Patch SHA-256 mismatch. Expected $env:PATCH_SHA256, got $actualPatch" }
+          git apply --directory=work/source --whitespace=nowarn work/v121.patch
+          if ($LASTEXITCODE -ne 0) { throw 'v1.2.1 source patch failed to apply' }
+          Get-ChildItem -Recurse work/source/GuidedArrow.Progression/Source -File | Sort-Object FullName | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.FullName.Substring((Resolve-Path work/source).Path.Length + 1))"
+          } | Set-Content artifacts/source-manifest.sha256
+      - name: Restore and build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $project = 'work/source/GuidedArrow.Progression/Source/GuidedArrow.Progression.csproj'
+          dotnet restore $project *>&1 | Tee-Object -FilePath artifacts/build.log -Append
+          dotnet build $project -c Release --no-restore -o artifacts /p:ContinuousIntegrationBuild=true *>&1 | Tee-Object -FilePath artifacts/build.log -Append
+          if (-not (Test-Path 'artifacts/GuidedArrow.Progression.dll')) { throw 'GuidedArrow.Progression.dll was not produced' }
+          Get-FileHash artifacts/GuidedArrow.Progression.dll -Algorithm SHA256 | Format-List | Out-String | Tee-Object -FilePath artifacts/build.log -Append
+      - name: Upload compiled build
+        uses: actions/upload-artifact@v4
+        with:
+          name: GuidedArrow.Progression-v1.2.1-clean-bin
+          path: artifacts
+          if-no-files-found: error
+          retention-days: 7
