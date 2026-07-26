@@ -46,6 +46,13 @@ jobs:
           $text = $text.Replace(
             '89b9ed95c39b0873a5716602751c4e0a98d101a14368587efb85ab404ef92125',
             '161a3f42ee089b8313fc7df71b6f66e118e12a59c8457e6d1e94a57ae6f2e89f')
+          $unsupported = @'
+          $loadedAssembly = [Reflection.Assembly]::ReflectionOnlyLoadFrom($built.FullName)
+          if ($loadedAssembly.GetReferencedAssemblies().Name -contains 'PlayerSettlementCultureVisuals') {
+              throw 'External PlayerSettlementCultureVisuals assembly reference remains'
+          }
+          '@
+          $text = $text.Replace($unsupported, '')
           Set-Content -Encoding UTF8 $path $text
       - name: Build and validate Player Settlement 7.6.9
         shell: pwsh
