@@ -46,6 +46,14 @@ jobs:
           Expand-Archive -LiteralPath $env:SOURCE_ZIP -DestinationPath work/source -Force
           if (-not (Test-Path 'work/source/GuidedArrow.Progression/Source/GuidedArrow.Progression.csproj')) { throw 'Expected project missing after extraction' }
 
+          # Temporary compile-probe patch. The final source archive will contain this correction directly.
+          $screen = 'work/source/GuidedArrow.Progression/Source/GuidedArrowMasteryScreen.cs'
+          $text = [System.IO.File]::ReadAllText($screen)
+          $old = 'new GauntletLayer(100, "GuidedArrowMastery")'
+          $new = 'new GauntletLayer("GuidedArrowMastery", 100)'
+          if (-not $text.Contains($old)) { throw 'Expected GauntletLayer constructor text was not found.' }
+          [System.IO.File]::WriteAllText($screen, $text.Replace($old, $new))
+
       - name: Restore and build with retained diagnostics
         id: compile
         continue-on-error: true
@@ -55,6 +63,7 @@ jobs:
           dotnet restore $project *>&1 | Tee-Object -FilePath artifacts/build.log -Append
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet build $project -c Release --no-restore -o artifacts /p:ContinuousIntegrationBuild=true *>&1 | Tee-Object -FilePath artifacts/build.log -Append
+          if (-not (Test-Path 'artifacts/GuidedArrow.Progression.dll')) { exit 1 }
           exit $LASTEXITCODE
 
       - name: Record output hashes
